@@ -5,30 +5,33 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // DiffResult is the output of comparing two JSON responses for one test case.
 type DiffResult struct {
-	Scenario       string          `json:"scenario"`
-	Date           string          `json:"date"`
-	LegacyStatus   int             `json:"legacy_status"`
-	NewStatus      int             `json:"new_status"`
-	Summary        DiffSummary     `json:"summary"`
-	OnlyInLegacy   []string        `json:"only_in_legacy,omitempty"`
-	OnlyInNew      []string        `json:"only_in_new,omitempty"`
-	Differences    []FieldDiff     `json:"differences,omitempty"`
-	Errors         []string        `json:"errors,omitempty"`
+	Scenario       string                   `json:"scenario"`
+	Date           string                   `json:"date"`
+	LegacyStatus   int                      `json:"legacy_status"`
+	NewStatus      int                      `json:"new_status"`
+	Summary        DiffSummary              `json:"summary"`
+	OnlyInLegacy   []string                 `json:"only_in_legacy,omitempty"`
+	OnlyInNew      []string                 `json:"only_in_new,omitempty"`
+	Differences    map[string]CategoryDiff  `json:"differences,omitempty"`
+	Errors         []string                 `json:"errors,omitempty"`
+	rawDiffs       []FieldDiff              // internal accumulator during comparison
 }
 
 // DiffSummary contains aggregate stats.
 type DiffSummary struct {
-	TripsLegacy      int `json:"trips_legacy"`
-	TripsNew         int `json:"trips_new"`
-	TripsMatched     int `json:"trips_matched"`
-	TripsOnlyLegacy  int `json:"trips_only_in_legacy"`
-	TripsOnlyNew     int `json:"trips_only_in_new"`
-	FieldsCompared   int `json:"fields_compared"`
-	FieldsDifferent  int `json:"fields_different"`
+	TripsLegacy      int            `json:"trips_legacy"`
+	TripsNew         int            `json:"trips_new"`
+	TripsMatched     int            `json:"trips_matched"`
+	TripsOnlyLegacy  int            `json:"trips_only_in_legacy"`
+	TripsOnlyNew     int            `json:"trips_only_in_new"`
+	FieldsCompared   int            `json:"fields_compared"`
+	FieldsDifferent  int            `json:"fields_different"`
+	CategoryCounts   map[string]int `json:"category_counts,omitempty"`
 }
 
 // FieldDiff represents a single field difference.
@@ -37,6 +40,12 @@ type FieldDiff struct {
 	Path    string `json:"path"`
 	Legacy  any    `json:"legacy"`
 	New     any    `json:"new"`
+}
+
+// CategoryDiff groups field differences under a top-level response category.
+type CategoryDiff struct {
+	Count       int         `json:"count"`
+	Differences []FieldDiff `json:"differences"`
 }
 
 // Differ compares two JSON search responses.
@@ -82,7 +91,7 @@ func (d *Differ) Compare(tc TestCase, legacyBody, newBody []byte, legacyStatus, 
 	// Compare recheck URLs as sorted sets
 	d.compareStringArrays(result, "recheck", legacyData["recheck"], newData["recheck"])
 
-	result.Summary.FieldsDifferent = len(result.Differences)
+	result.groupDifferences()
 	return result
 }
 
@@ -93,9 +102,9 @@ func (d *Differ) compareTrips(result *DiffResult, legacy, newData map[string]any
 	result.Summary.TripsLegacy = len(legacyTrips)
 	result.Summary.TripsNew = len(newTrips)
 
-	// Index by trip_key
-	legacyByKey := indexByField(legacyTrips, "trip_key")
-	newByKey := indexByField(newTrips, "trip_key")
+	// Index by "id" field (MD5 hash in V1 format)
+	legacyByKey := indexByField(legacyTrips, "id")
+	newByKey := indexByField(newTrips, "id")
 
 	// Find trips only in legacy
 	for key := range legacyByKey {
@@ -129,15 +138,49 @@ func (d *Differ) compareTrips(result *DiffResult, legacy, newData map[string]any
 }
 
 func (d *Differ) compareTripFields(result *DiffResult, tripKey string, legacy, newTrip map[string]any) {
-	// Compare scalar trip fields
-	for _, field := range []string{"group_key", "is_bookable", "has_valid_price", "is_connection", "rank_score", "special_deal", "new_trip"} {
+	// Compare scalar trip-level fields (V1 format)
+	for _, field := range []string{
+		"chunk_key", "route_name", "show_map", "transfer_id",
+		"score_sorting", "sales_sorting", "bookings_last_month",
+		"is_solo_traveler", "is_boosted", "connected_with",
+	} {
 		d.compareField(result, tripKey, field, legacy[field], newTrip[field])
 	}
 
-	// Compare tags
-	d.compareStringArrays(result, fmt.Sprintf("trips[%s].tags", tripKey), legacy["tags"], newTrip["tags"])
+	// Compare params sub-object
+	legParams := toMap(legacy["params"])
+	newParams := toMap(newTrip["params"])
+	if legParams != nil && newParams != nil {
+		for _, field := range []string{
+			"from", "to", "dep_time", "arr_time", "duration", "stops",
+			"bookable", "status", "is_bookable", "disabled", "hide", "date",
+		} {
+			d.compareField(result, tripKey, "params."+field, legParams[field], newParams[field])
+		}
+		// Compare params.min_price
+		legPrice := toMap(legParams["min_price"])
+		newPrice := toMap(newParams["min_price"])
+		if legPrice != nil || newPrice != nil {
+			if legPrice == nil || newPrice == nil {
+				d.compareField(result, tripKey, "params.min_price", legParams["min_price"], newParams["min_price"])
+			} else {
+				d.compareField(result, tripKey, "params.min_price.value", legPrice["value"], newPrice["value"])
+				d.compareField(result, tripKey, "params.min_price.fxcode", legPrice["fxcode"], newPrice["fxcode"])
+			}
+		}
+		d.compareField(result, tripKey, "params.min_rating", legParams["min_rating"], newParams["min_rating"])
+		d.compareField(result, tripKey, "params.rating_count", legParams["rating_count"], newParams["rating_count"])
+		d.compareField(result, tripKey, "params.reason", legParams["reason"], newParams["reason"])
+		// Compare params.vehclasses array
+		d.compareAnyArrays(result, tripKey, "params.vehclasses", legParams["vehclasses"], newParams["vehclasses"])
+		// Compare params.operators array
+		d.compareAnyArrays(result, tripKey, "params.operators", legParams["operators"], newParams["operators"])
+	}
 
-	// Compare segments by index
+	// Compare tags
+	d.compareAnyArrays(result, tripKey, "tags", legacy["tags"], newTrip["tags"])
+
+	// Compare segments by index (V1 format)
 	legacySegs := toSlice(legacy["segments"])
 	newSegs := toSlice(newTrip["segments"])
 	maxSegs := len(legacySegs)
@@ -145,7 +188,7 @@ func (d *Differ) compareTripFields(result *DiffResult, tripKey string, legacy, n
 		maxSegs = len(newSegs)
 	}
 	if len(legacySegs) != len(newSegs) {
-		result.Differences = append(result.Differences, FieldDiff{
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
 			TripKey: tripKey,
 			Path:    "segments.length",
 			Legacy:  len(legacySegs),
@@ -159,12 +202,16 @@ func (d *Differ) compareTripFields(result *DiffResult, tripKey string, legacy, n
 		legSeg := toMap(legacySegs[i])
 		newSeg := toMap(newSegs[i])
 		prefix := fmt.Sprintf("segments[%d]", i)
-		for _, field := range []string{"from_station_id", "to_station_id", "departure", "arrival", "duration", "operator_id", "class_id", "vehclass_id", "type"} {
+		for _, field := range []string{
+			"type", "trip_id", "official_id", "from", "to",
+			"dep_time", "arr_time", "duration", "class", "operator",
+			"rating", "show_map", "search_results_marker", "price",
+		} {
 			d.compareField(result, tripKey, prefix+"."+field, legSeg[field], newSeg[field])
 		}
 	}
 
-	// Compare travel_options matched by trip_key + integration_code
+	// Compare travel_options matched by "id" field (V1 format)
 	d.compareTravelOptions(result, tripKey, legacy["travel_options"], newTrip["travel_options"])
 }
 
@@ -172,11 +219,12 @@ func (d *Differ) compareTravelOptions(result *DiffResult, tripKey string, legacy
 	legacyOpts := toSlice(legacyRaw)
 	newOpts := toSlice(newRaw)
 
-	legacyByKey := indexByCompoundKey(legacyOpts, "trip_key", "integration_code")
-	newByKey := indexByCompoundKey(newOpts, "trip_key", "integration_code")
+	// V1 format: match travel options by "id" field
+	legacyByKey := indexByField(legacyOpts, "id")
+	newByKey := indexByField(newOpts, "id")
 
 	if len(legacyOpts) != len(newOpts) {
-		result.Differences = append(result.Differences, FieldDiff{
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
 			TripKey: tripKey,
 			Path:    "travel_options.length",
 			Legacy:  len(legacyOpts),
@@ -187,7 +235,7 @@ func (d *Differ) compareTravelOptions(result *DiffResult, tripKey string, legacy
 	for key, legOpt := range legacyByKey {
 		newOpt, ok := newByKey[key]
 		if !ok {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				TripKey: tripKey,
 				Path:    fmt.Sprintf("travel_options[%s]", key),
 				Legacy:  "present",
@@ -197,30 +245,104 @@ func (d *Differ) compareTravelOptions(result *DiffResult, tripKey string, legacy
 		}
 
 		prefix := fmt.Sprintf("travel_options[%s]", key)
-		d.compareField(result, tripKey, prefix+".available_seats", legOpt["available_seats"], newOpt["available_seats"])
-		d.compareField(result, tripKey, prefix+".departure_time", legOpt["departure_time"], newOpt["departure_time"])
+
+		// Compare V1 travel option fields
+		for _, field := range []string{
+			"bookable", "class", "ticket_type",
+			"confirmation_time", "confirmation_minutes", "confirmation_message",
+			"cancellation", "full_refund_until", "cancellation_message",
+			"rating", "rating_count", "is_bookable", "reason",
+			"booking_uri", "bookings_last_month", "sales_sorting",
+		} {
+			d.compareField(result, tripKey, prefix+"."+field, legOpt[field], newOpt[field])
+		}
 
 		// Compare price
 		legPrice := toMap(legOpt["price"])
 		newPrice := toMap(newOpt["price"])
-		pricePrefix := prefix + ".price"
-		for _, field := range []string{"total", "fxcode", "price_level", "is_valid"} {
-			d.compareField(result, tripKey, pricePrefix+"."+field, legPrice[field], newPrice[field])
+		if legPrice != nil || newPrice != nil {
+			if legPrice == nil || newPrice == nil {
+				d.compareField(result, tripKey, prefix+".price", legOpt["price"], newOpt["price"])
+			} else {
+				d.compareField(result, tripKey, prefix+".price.value", legPrice["value"], newPrice["value"])
+				d.compareField(result, tripKey, prefix+".price.fxcode", legPrice["fxcode"], newPrice["fxcode"])
+			}
 		}
 
-		// Compare fares
-		d.compareFares(result, tripKey, pricePrefix, legPrice["fares"], newPrice["fares"])
+		// Compare array fields
+		d.compareAnyArrays(result, tripKey, prefix+".amenities", legOpt["amenities"], newOpt["amenities"])
+		d.compareAnyArrays(result, tripKey, prefix+".labels", legOpt["labels"], newOpt["labels"])
+
+		// Compare buy items
+		d.compareBuyItems(result, tripKey, prefix, legOpt["buy"], newOpt["buy"])
 	}
 
 	// Check for travel options only in new
 	for key := range newByKey {
 		if _, ok := legacyByKey[key]; !ok {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				TripKey: tripKey,
 				Path:    fmt.Sprintf("travel_options[%s]", key),
 				Legacy:  "missing",
 				New:     "present",
 			})
+		}
+	}
+}
+
+// compareAnyArrays compares two JSON arrays element-by-element using fmt.Sprintf for comparison.
+func (d *Differ) compareAnyArrays(result *DiffResult, tripKey, path string, legacyRaw, newRaw any) {
+	legacyArr := toSlice(legacyRaw)
+	newArr := toSlice(newRaw)
+
+	if len(legacyArr) != len(newArr) {
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
+			TripKey: tripKey,
+			Path:    path + ".length",
+			Legacy:  len(legacyArr),
+			New:     len(newArr),
+		})
+		result.Summary.FieldsCompared++
+		return
+	}
+
+	for i := range legacyArr {
+		result.Summary.FieldsCompared++
+		if !d.valuesEqual(legacyArr[i], newArr[i]) {
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
+				TripKey: tripKey,
+				Path:    fmt.Sprintf("%s[%d]", path, i),
+				Legacy:  legacyArr[i],
+				New:     newArr[i],
+			})
+		}
+	}
+}
+
+// compareBuyItems compares buy item arrays in travel options.
+func (d *Differ) compareBuyItems(result *DiffResult, tripKey, prefix string, legacyRaw, newRaw any) {
+	legacyItems := toSlice(legacyRaw)
+	newItems := toSlice(newRaw)
+
+	if len(legacyItems) != len(newItems) {
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
+			TripKey: tripKey,
+			Path:    prefix + ".buy.length",
+			Legacy:  len(legacyItems),
+			New:     len(newItems),
+		})
+		return
+	}
+
+	for i := range legacyItems {
+		legItem := toMap(legacyItems[i])
+		newItem := toMap(newItems[i])
+		if legItem == nil || newItem == nil {
+			continue
+		}
+		buyPrefix := fmt.Sprintf("%s.buy[%d]", prefix, i)
+		for _, field := range []string{"trip_id", "from_id", "to_id", "date", "date2", "date3"} {
+			d.compareField(result, tripKey, buyPrefix+"."+field, legItem[field], newItem[field])
 		}
 	}
 }
@@ -243,13 +365,13 @@ func (d *Differ) compareFares(result *DiffResult, tripKey, prefix string, legacy
 		farePrefix := fmt.Sprintf("%s.fares.%s", prefix, fareType)
 
 		if legFare == nil && newFare != nil {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				TripKey: tripKey, Path: farePrefix, Legacy: nil, New: "present",
 			})
 			continue
 		}
 		if legFare != nil && newFare == nil {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				TripKey: tripKey, Path: farePrefix, Legacy: "present", New: nil,
 			})
 			continue
@@ -279,13 +401,13 @@ func (d *Differ) compareDicts(result *DiffResult, legacy, newData map[string]any
 		newEntry := toMap(newDict[key])
 
 		if legEntry == nil && newEntry != nil {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				Path: prefix, Legacy: nil, New: "present",
 			})
 			continue
 		}
 		if legEntry != nil && newEntry == nil {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				Path: prefix, Legacy: "present", New: nil,
 			})
 			continue
@@ -304,7 +426,7 @@ func (d *Differ) compareField(result *DiffResult, tripKey, path string, legacy, 
 		return
 	}
 
-	result.Differences = append(result.Differences, FieldDiff{
+	result.rawDiffs = append(result.rawDiffs, FieldDiff{
 		TripKey: tripKey,
 		Path:    path,
 		Legacy:  legacy,
@@ -320,7 +442,7 @@ func (d *Differ) compareStringArrays(result *DiffResult, path string, legacyRaw,
 	sort.Strings(newArr)
 
 	if len(legacyArr) != len(newArr) {
-		result.Differences = append(result.Differences, FieldDiff{
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
 			Path: path + ".length", Legacy: len(legacyArr), New: len(newArr),
 		})
 		result.Summary.FieldsCompared++
@@ -330,7 +452,7 @@ func (d *Differ) compareStringArrays(result *DiffResult, path string, legacyRaw,
 	for i := range legacyArr {
 		result.Summary.FieldsCompared++
 		if legacyArr[i] != newArr[i] {
-			result.Differences = append(result.Differences, FieldDiff{
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
 				Path: fmt.Sprintf("%s[%d]", path, i), Legacy: legacyArr[i], New: newArr[i],
 			})
 		}
@@ -353,6 +475,56 @@ func (d *Differ) valuesEqual(a, b any) bool {
 	}
 
 	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// standardCategories are the 5 top-level response sections always reported.
+var standardCategories = []string{"classes", "operators", "recheck", "stations", "trips"}
+
+// groupDifferences converts the flat rawDiffs into a categorized map.
+// All 5 standard categories are always present, even with count 0.
+func (r *DiffResult) groupDifferences() {
+	cats := make(map[string][]FieldDiff)
+	for _, d := range r.rawDiffs {
+		cat := categorize(d)
+		cats[cat] = append(cats[cat], d)
+	}
+	r.Differences = make(map[string]CategoryDiff)
+	r.Summary.CategoryCounts = make(map[string]int)
+	// Always include all standard categories
+	for _, cat := range standardCategories {
+		r.Differences[cat] = CategoryDiff{Count: 0, Differences: []FieldDiff{}}
+		r.Summary.CategoryCounts[cat] = 0
+	}
+	// Fill in actual counts
+	for cat, diffs := range cats {
+		r.Differences[cat] = CategoryDiff{Count: len(diffs), Differences: diffs}
+		r.Summary.CategoryCounts[cat] = len(diffs)
+	}
+	r.Summary.FieldsDifferent = len(r.rawDiffs)
+}
+
+// categorize determines which top-level response category a diff belongs to.
+func categorize(d FieldDiff) string {
+	if d.TripKey != "" {
+		return "trips"
+	}
+	path := d.Path
+	if strings.HasPrefix(path, "trips") {
+		return "trips"
+	}
+	if strings.HasPrefix(path, "stations") {
+		return "stations"
+	}
+	if strings.HasPrefix(path, "operators") {
+		return "operators"
+	}
+	if strings.HasPrefix(path, "classes") {
+		return "classes"
+	}
+	if strings.HasPrefix(path, "recheck") {
+		return "recheck"
+	}
+	return "other"
 }
 
 // --- helpers ---

@@ -3,12 +3,37 @@ package repository
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/12go/f4/internal/domain"
 )
+
+var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugifyName converts a station name to a URL-safe slug (matching PHP Slugger).
+func slugifyName(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = nonAlphaNum.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	return s
+}
+
+// buildStationNameFull computes the full station name (matching PHP StationManager::getStationNameFull).
+// Format: "CODE StationName, ProvinceName" (code only for avia, province only if not already in name).
+// Province check is case-sensitive to match PHP strpos behavior.
+func buildStationNameFull(stationName, provinceName, vehclassID, stationCode string) string {
+	name := stationName
+	if provinceName != "" && !strings.Contains(stationName, provinceName) {
+		name = name + ", " + provinceName
+	}
+	if vehclassID == "avia" && stationCode != "" {
+		name = stationCode + " " + name
+	}
+	return name
+}
 
 // StationRepo handles station, province, and place resolution queries.
 type StationRepo struct {
@@ -19,22 +44,43 @@ func NewStationRepo(db *sqlx.DB) *StationRepo {
 	return &StationRepo{db: db}
 }
 
+// stationRow extends Station with province_name for computing derived fields.
+type stationRow struct {
+	domain.Station
+	ProvinceName string `db:"province_name"`
+}
+
+func (row stationRow) toStation() domain.Station {
+	s := row.Station
+	s.StationSlug = slugifyName(s.StationName)
+	code := ""
+	if s.StationCode != nil {
+		code = *s.StationCode
+	}
+	s.StationNameFull = buildStationNameFull(s.StationName, row.ProvinceName, s.VehclassID, code)
+	return s
+}
+
 // FindStationByID returns a single station by ID.
 func (r *StationRepo) FindStationByID(ctx context.Context, id int) (domain.Station, error) {
-	var s domain.Station
-	err := r.db.GetContext(ctx, &s, `
+	var row stationRow
+	err := r.db.GetContext(ctx, &row, `
 		SELECT s.station_id, COALESCE(s.station_name, '') AS station_name,
-		       COALESCE(s.station_code, '') AS station_code,
+		       s.station_code,
 		       COALESCE(s.lat, 0) AS lat, COALESCE(s.lng, 0) AS lng,
 		       s.province_id, COALESCE(p.country_id, '') AS country_id,
 		       COALESCE(s.vehclass_id, '') AS vehclass_id, p.timezone_id,
 		       tz.timezone_name, COALESCE(s.weight_from, 0) AS weight_from,
-		       COALESCE(s.coordinates_accurate, 0) AS coordinates_accurate
+		       COALESCE(s.coordinates_accurate, 0) AS coordinates_accurate,
+		       COALESCE(p.province_name, '') AS province_name
 		FROM station s
 		JOIN province p ON p.province_id = s.province_id
 		JOIN timezone tz ON tz.timezone_id = p.timezone_id
 		WHERE s.station_id = ?`, id)
-	return s, err
+	if err != nil {
+		return domain.Station{}, err
+	}
+	return row.toStation(), nil
 }
 
 // FindStationsByIDs returns stations by IDs as a map.
@@ -44,12 +90,13 @@ func (r *StationRepo) FindStationsByIDs(ctx context.Context, ids []int) (map[int
 	}
 	query, args, err := sqlx.In(`
 		SELECT s.station_id, COALESCE(s.station_name, '') AS station_name,
-		       COALESCE(s.station_code, '') AS station_code,
+		       s.station_code,
 		       COALESCE(s.lat, 0) AS lat, COALESCE(s.lng, 0) AS lng,
 		       s.province_id, COALESCE(p.country_id, '') AS country_id,
 		       COALESCE(s.vehclass_id, '') AS vehclass_id, p.timezone_id,
 		       tz.timezone_name, COALESCE(s.weight_from, 0) AS weight_from,
-		       COALESCE(s.coordinates_accurate, 0) AS coordinates_accurate
+		       COALESCE(s.coordinates_accurate, 0) AS coordinates_accurate,
+		       COALESCE(p.province_name, '') AS province_name
 		FROM station s
 		JOIN province p ON p.province_id = s.province_id
 		JOIN timezone tz ON tz.timezone_id = p.timezone_id
@@ -58,13 +105,14 @@ func (r *StationRepo) FindStationsByIDs(ctx context.Context, ids []int) (map[int
 		return nil, err
 	}
 
-	var stations []domain.Station
-	if err := r.db.SelectContext(ctx, &stations, r.db.Rebind(query), args...); err != nil {
+	var rows []stationRow
+	if err := r.db.SelectContext(ctx, &rows, r.db.Rebind(query), args...); err != nil {
 		return nil, err
 	}
 
-	result := make(map[int]domain.Station, len(stations))
-	for _, s := range stations {
+	result := make(map[int]domain.Station, len(rows))
+	for _, row := range rows {
+		s := row.toStation()
 		result[s.StationID] = s
 	}
 	return result, nil
@@ -157,24 +205,49 @@ func (r *StationRepo) GetPlaceData(ctx context.Context, placeID string) (domain.
 	return place, nil
 }
 
-// GetParentProvinceName returns the parent province name for a place ID, or empty string.
+// GetParentProvinceName returns the province name for a place ID, navigating to parent if available.
+// Matches PHP PlaceManager::getParentProvinceName — if province has parent_id, return parent name;
+// otherwise return province's own name.
 func (r *StationRepo) GetParentProvinceName(ctx context.Context, placeID string) string {
-	suffix := placeID[len(placeID)-1:]
-	if suffix != "p" {
+	if len(placeID) < 2 {
 		return ""
 	}
+	suffix := placeID[len(placeID)-1:]
 	numStr := placeID[:len(placeID)-1]
 	var id int
 	if _, err := fmt.Sscanf(numStr, "%d", &id); err != nil {
 		return ""
 	}
-	var name string
-	_ = r.db.GetContext(ctx, &name, `
-		SELECT parent.province_name
-		FROM province p
-		JOIN province parent ON parent.province_id = p.parent_id
-		WHERE p.province_id = ? AND p.parent_id IS NOT NULL`, id)
-	return name
+
+	// If it's a station, resolve to its province first
+	if suffix == "s" {
+		var provinceID int
+		if err := r.db.GetContext(ctx, &provinceID,
+			`SELECT province_id FROM station WHERE station_id = ?`, id); err != nil {
+			return ""
+		}
+		id = provinceID
+	}
+
+	// Get province, navigate to parent if exists
+	var p struct {
+		ProvinceName string `db:"province_name"`
+		ParentID     *int   `db:"parent_id"`
+	}
+	if err := r.db.GetContext(ctx, &p,
+		`SELECT province_name, parent_id FROM province WHERE province_id = ?`, id); err != nil {
+		return ""
+	}
+
+	if p.ParentID != nil {
+		var parentName string
+		if err := r.db.GetContext(ctx, &parentName,
+			`SELECT province_name FROM province WHERE province_id = ?`, *p.ParentID); err == nil {
+			return parentName
+		}
+	}
+
+	return p.ProvinceName
 }
 
 // GetTimezoneByStationID returns the timezone name for a station.

@@ -53,9 +53,18 @@ type PriceV2 struct {
 	FXCode         string                     `json:"fxcode"`
 	PriceLevel     int                        `json:"price_level"`
 	IsValid        bool                       `json:"is_valid"`
-	Fares          map[string]FareV1          `json:"fares,omitempty"`
+	Fares          map[string]FareV2          `json:"fares,omitempty"`
 	DiscountDeltas map[string]PriceDeltaV2    `json:"discount_deltas,omitempty"`
 	RuleDeltas     map[string]PriceDeltaV2    `json:"rule_deltas,omitempty"`
+}
+
+// FareV2 is a single fare block in API v2.
+type FareV2 struct {
+	FullPrice float64 `json:"full_price"`
+	FXCode    string  `json:"fxcode"`
+	NetPrice  float64 `json:"net_price,omitempty"`
+	Topup     float64 `json:"topup,omitempty"`
+	SysFee    float64 `json:"sys_fee,omitempty"`
 }
 
 // PriceDeltaV2 represents a price adjustment.
@@ -123,10 +132,10 @@ func tripToV2(t domain.TripResult) TripResultV2 {
 }
 
 func travelOptionToV2(o domain.TravelOption) TravelOptionV2 {
-	fares := make(map[string]FareV1)
+	fares := make(map[string]FareV2)
 	for name, f := range o.Price.Fares {
 		if f != nil {
-			fares[name] = FareV1{
+			fares[name] = FareV2{
 				FullPrice: f.FullPrice,
 				FXCode:    f.FullPriceFXCode,
 				NetPrice:  f.NetPrice,

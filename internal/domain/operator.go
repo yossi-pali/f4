@@ -2,15 +2,16 @@ package domain
 
 // Operator represents a transport operator.
 type Operator struct {
-	OperatorID int    `json:"operator_id" db:"operator_id"`
-	Name       string `json:"name" db:"operator_name"`
-	Slug       string `json:"slug" db:"slug"`
-	SellerID   int    `json:"seller_id" db:"seller_id"`
-	MasterID   int    `json:"master_id" db:"master_id"`
-	Bookable   bool   `json:"-" db:"bookable"`
-	LogoURL    string `json:"logo_url,omitempty"`
-	RatingAvg  float64 `json:"rating_avg,omitempty"`
-	RatingCount int    `json:"rating_count,omitempty"`
+	OperatorID    int     `json:"operator_id"`
+	Name          string  `json:"name"`
+	Slug          string  `json:"slug"`          // computed from name via Slugger
+	SellerID      int     `json:"seller_id"`
+	MasterID      int     `json:"master_id"`
+	Bookable      bool    `json:"-"`
+	RatingAvg     float64 `json:"rating_avg,omitempty"`
+	RatingCount   int     `json:"rating_count,omitempty"`
+	Code          *string `json:"-"`              // operator_code column
+	CounterpartID int     `json:"-"`              // from seller table
 }
 
 // Seller represents a seller/aggregator company.

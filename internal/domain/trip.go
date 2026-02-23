@@ -100,6 +100,12 @@ type TripPlain struct {
 	Price               TripPrice
 }
 
+// PriceSimple is the simple {value, fxcode} price used in params.
+type PriceSimple struct {
+	Value  float64
+	FXCode string
+}
+
 // TripResult is a fully hydrated trip ready for API response.
 type TripResult struct {
 	TripKey       string
@@ -113,6 +119,39 @@ type TripResult struct {
 	RankScore     float64
 	SpecialDeal   bool
 	NewTrip       bool
+
+	// PHP-matching fields
+	ChunkKey               string
+	RouteName              string
+	ShowMap                bool
+	TransferID             string  // MD5(operatorID;fromID;toID;vehclassID;classID)
+	ConnectedWith          any     // null for now
+	ScoreSorting           float64
+	SalesSorting           float64
+	BookingsLastMonth      int
+	IsSoloTraveler         bool
+	IsBoosted              bool
+	OperatorReviewSnippets []any
+
+	// Params sub-object data
+	ParamsFrom        int
+	ParamsTo          int
+	ParamsDepTime     string // "YYYY-MM-DD HH:MM:SS"
+	ParamsArrTime     string // "DD.MM.YYYY HH:MM:SS"
+	ParamsDuration    int
+	ParamsStops       int
+	ParamsVehclasses  []string
+	ParamsOperators   []int
+	ParamsBookable    int
+	ParamsMinPrice    *PriceSimple
+	ParamsMinRating   *float64
+	ParamsRatingCount *int
+	ParamsStatus      int
+	ParamsIsBookable  int // 0 or 1
+	ParamsDisabled    int
+	ParamsReason      string
+	ParamsHide        bool
+	ParamsDate        string
 }
 
 // Segment represents one leg of a trip.
@@ -126,6 +165,26 @@ type Segment struct {
 	ClassID       int
 	VehclassID    string
 	Type          string // "route" or "wait"
+
+	// PHP-matching fields
+	TripID              string   // the trip key
+	OfficialID          string
+	Vehclasses          []string // e.g. ["train"]
+	Photos              []any    // Image 5-tuples
+	Price               any      // null for segments
+	Rating              any      // null for segments
+	SearchResultsMarker any      // null
+	ShowMap             bool
+}
+
+// BuyItemV1 represents a single buy item for recheck.
+type BuyItemV1 struct {
+	TripID string
+	FromID int
+	ToID   int
+	Date   string  // "YYYY-MM-DD-HH-MM-SS"
+	Date2  *string
+	Date3  *string
 }
 
 // TravelOption represents a bookable option for a trip.
@@ -139,4 +198,33 @@ type TravelOption struct {
 	DepartureTime   int
 	Departure2Time  int
 	Departure3Time  int
+
+	// PHP-matching fields
+	ID                string
+	ClassID           int
+	Bookable          int
+	Rating            *float64
+	RatingCount       int
+	Amenities         []string
+	TicketType        string
+	ConfirmationTime  int // days
+	ConfirmMinutes    int
+	ConfirmMessage    string
+	Cancellation      int
+	CancellationMsg   string
+	FullRefundUntil   *string
+	Baggage           any // {value, icon, message}
+	Photos            []any
+	Labels            []any
+	Features          any // [] or {}
+	IsBookable        int // 0 or 1
+	Reason            *string
+	BookingsLastMonth int
+	SalesSorting      float64
+	Buy               []BuyItemV1
+	FromStationID     int
+	ToStationID       int
+	DepGodate         string // "YYYY-MM-DD-HH-MM-SS"
+	DepGodate2        *string
+	DepGodate3        *string
 }

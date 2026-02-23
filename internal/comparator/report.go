@@ -18,13 +18,14 @@ type RunSummary struct {
 
 // CaseSummary is a single test case in the summary.
 type CaseSummary struct {
-	Scenario      string `json:"scenario"`
-	Date          string `json:"date"`
-	TripsLegacy   int    `json:"trips_legacy"`
-	TripsNew      int    `json:"trips_new"`
-	TripsMatched  int    `json:"trips_matched"`
-	FieldsDiff    int    `json:"fields_different"`
-	Status        string `json:"status"` // PASS, DIFF, ERROR
+	Scenario       string         `json:"scenario"`
+	Date           string         `json:"date"`
+	TripsLegacy    int            `json:"trips_legacy"`
+	TripsNew       int            `json:"trips_new"`
+	TripsMatched   int            `json:"trips_matched"`
+	FieldsDiff     int            `json:"fields_different"`
+	CategoryCounts map[string]int `json:"category_counts,omitempty"`
+	Status         string         `json:"status"` // PASS, DIFF, ERROR
 }
 
 // PrintReport prints a formatted summary table to stdout.
@@ -45,6 +46,9 @@ func PrintReport(summary *RunSummary, outputDir string) {
 		maxName, "Scenario", "Date", "Legacy", "New", "Match", "Diff", "Status")
 	fmt.Println(strings.Repeat("-", maxName+2+10+2+6+2+6+2+6+2+6+2+10))
 
+	// Category display order
+	categoryOrder := []string{"classes", "operators", "recheck", "stations", "trips"}
+
 	// Rows
 	for _, c := range summary.Cases {
 		status := c.Status
@@ -54,6 +58,27 @@ func PrintReport(summary *RunSummary, outputDir string) {
 		fmt.Printf("%-*s  %-10s  %6d  %6d  %6d  %6d  %s\n",
 			maxName, c.Scenario, c.Date,
 			c.TripsLegacy, c.TripsNew, c.TripsMatched, c.FieldsDiff, status)
+		if len(c.CategoryCounts) > 0 {
+			var parts []string
+			for _, cat := range categoryOrder {
+				cnt := c.CategoryCounts[cat] // 0 if missing
+				parts = append(parts, fmt.Sprintf("%s: %d", cat, cnt))
+			}
+			// Include any categories not in the standard order
+			for cat, cnt := range c.CategoryCounts {
+				found := false
+				for _, co := range categoryOrder {
+					if co == cat {
+						found = true
+						break
+					}
+				}
+				if !found && cnt > 0 {
+					parts = append(parts, fmt.Sprintf("%s: %d", cat, cnt))
+				}
+			}
+			fmt.Printf("%*s  %s\n", maxName, "", strings.Join(parts, "  "))
+		}
 	}
 
 	// Footer
@@ -75,7 +100,7 @@ func BuildSummary(timestamp string, floatTolerance float64, diffs []*DiffResult)
 		if len(d.Errors) > 0 {
 			status = "ERROR"
 			summary.Errored++
-		} else if len(d.Differences) > 0 || d.Summary.TripsOnlyLegacy > 0 || d.Summary.TripsOnlyNew > 0 {
+		} else if d.Summary.FieldsDifferent > 0 || d.Summary.TripsOnlyLegacy > 0 || d.Summary.TripsOnlyNew > 0 {
 			status = "DIFF"
 			summary.Diffed++
 		} else {
@@ -83,13 +108,14 @@ func BuildSummary(timestamp string, floatTolerance float64, diffs []*DiffResult)
 		}
 
 		summary.Cases = append(summary.Cases, CaseSummary{
-			Scenario:     d.Scenario,
-			Date:         d.Date,
-			TripsLegacy:  d.Summary.TripsLegacy,
-			TripsNew:     d.Summary.TripsNew,
-			TripsMatched: d.Summary.TripsMatched,
-			FieldsDiff:   d.Summary.FieldsDifferent,
-			Status:       status,
+			Scenario:       d.Scenario,
+			Date:           d.Date,
+			TripsLegacy:    d.Summary.TripsLegacy,
+			TripsNew:       d.Summary.TripsNew,
+			TripsMatched:   d.Summary.TripsMatched,
+			FieldsDiff:     d.Summary.FieldsDifferent,
+			CategoryCounts: d.Summary.CategoryCounts,
+			Status:         status,
 		})
 	}
 
