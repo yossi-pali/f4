@@ -1,4 +1,4 @@
-.PHONY: build run test test-v test-fresh vet lint clean docker
+.PHONY: build run test test-v test-fresh vet lint clean docker compare compare-clean
 
 APP_NAME := f4
 BUILD_DIR := ./cmd/server
@@ -32,3 +32,9 @@ docker:
 
 docker-run: docker
 	docker run --rm -p 8080:8080 --env-file .env $(APP_NAME)
+
+compare:
+	go run ./cmd/comparator run
+
+compare-clean:
+	go run ./cmd/comparator clean

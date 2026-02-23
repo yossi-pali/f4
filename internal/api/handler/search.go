@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/12go/f4/internal/api/middleware"
+	"github.com/12go/f4/internal/api/response"
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/stage"
 )
@@ -51,7 +52,8 @@ func (h *SearchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	v1 := response.FromDomain(result.Trips, result.Recheck, result.Stations, result.Operators, result.Classes, result.ProvinceName)
+	json.NewEncoder(w).Encode(v1)
 }
 
 func parseSearchParams(r *http.Request) domain.SearchParams {

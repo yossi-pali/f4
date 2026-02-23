@@ -1,0 +1,67 @@
+endpoints:
+  legacy:
+    base_url: "http://internal-k8s-f3albperf-44c6078471-1289140507.us-east-1.elb.amazonaws.com"
+    headers:
+      Host: "recheck10.12go.com"
+    params:
+      ref: "https://recheck10.12go.com"
+  new:
+    base_url: "http://localhost:8080"
+    headers: {}
+    params: {}
+
+# Dates to test — each scenario runs once per date
+dates:
+  - "2026-03-23"
+  # - "2026-04-15"
+  # - "2026-05-20"
+
+# Float comparison tolerance (absolute)
+float_tolerance: 0.01
+
+scenarios:
+  # Place-to-place routes (uses /api/v1/search/{from}/{to}/{date})
+  - name: "Bangkok to Chiang Mai"
+    type: "place"
+    from: "1p"
+    to: "44p"
+    params:
+      seats: "1"
+
+  # - name: "Chiang Mai to Bangkok"
+  #   type: "place"
+  #   from: "44p"
+  #   to: "1p"
+  #   params:
+  #     seats: "1"
+
+  # - name: "Surat Thani to Koh Phangan"
+  #   type: "place"
+  #   from: "73p"
+  #   to: "78p"
+  #   params:
+  #     seats: "1"
+
+  # - name: "Surat Thani to Chiang Mai"
+  #   type: "place"
+  #   from: "73p"
+  #   to: "44p"
+  #   params:
+  #     seats: "1"
+
+  # - name: "Bangkok to Phuket"
+  #   type: "place"
+  #   from: "1p"
+  #   to: "88p"
+  #   params:
+  #     seats: "1"
+
+  # Station-to-station routes (uses /api/v1/searchByStations/{from}/{to}/{date})
+  # - name: "Station example"
+  #   type: "station"
+  #   from: "123-456"
+  #   to: "789-101"
+  #   params:
+  #     seats: "1"
+
+output_dir: "./test-results"
