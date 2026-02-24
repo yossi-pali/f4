@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/12go/f4/internal/domain"
 )
@@ -41,6 +42,22 @@ func (s *HydrateResultsStage) Execute(_ context.Context, in EnrichedTrips) (Hydr
 	out.Trips = results
 
 	return out, nil
+}
+
+func (s *HydrateResultsStage) getTripPhotos(raw domain.RawTrip, in EnrichedTrips) []any {
+	if in.Images == nil {
+		return []any{}
+	}
+	photos := in.Images.GetTripImages(
+		raw.OperatorID, raw.ClassID,
+		raw.OfficialID,
+		raw.DepStationID, raw.ArrStationID,
+		raw.RouteID,
+	)
+	if photos == nil {
+		return []any{}
+	}
+	return photos
 }
 
 func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) domain.TripResult {
@@ -107,6 +124,9 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 	// Build group key for merging duplicates (matches PHP TripResultBaseFactory::getTripId)
 	tr.GroupKey = buildTripUniqueKey(raw)
 
+	// Resolve photos for this trip (same photos used for segment and travel option)
+	photos := s.getTripPhotos(raw, in)
+
 	// Build primary segment
 	seg := domain.Segment{
 		FromStationID:       raw.DepStationID,
@@ -121,7 +141,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		TripID:              raw.TripKey,
 		OfficialID:          raw.OfficialID,
 		Vehclasses:          splitVehclass(raw.VehclassID),
-		Photos:              []any{},
+		Photos:              photos,
 		Price:               nil,
 		Rating:              nil,
 		SearchResultsMarker: nil,
@@ -164,9 +184,9 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		ConfirmMessage:    buildConfirmMessage(raw.AvgConfirmTime),
 		Cancellation:      cancelValue(raw.CancelHours, raw.IsFRefundable),
 		CancellationMsg:   cancelMessage(raw.CancelHours, raw.IsFRefundable),
-		FullRefundUntil:   nil,
+		FullRefundUntil:   buildFullRefundUntil(raw),
 		Baggage:           buildBaggage(raw.BaggageFreeWeight),
-		Photos:            []any{},
+		Photos:            photos,
 		Labels:            []any{},
 		Features:          []any{},
 		IsBookable:        boolToInt(isBookable),
@@ -180,6 +200,18 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		DepGodate:         depGodate,
 		DepGodate2:        depGodate2,
 		DepGodate3:        depGodate3,
+		PriceRestriction:  raw.PriceRestriction,
+	}
+
+	// Price breakdown from adult fare (conditional, matching PHP TravelOptionBaseFactory)
+	if adultFare := raw.Price.Fares["adult"]; adultFare != nil {
+		if in.Filter.NeedPassTopup {
+			opt.AgFee = &domain.PriceSimple{Value: adultFare.AgFee, FXCode: adultFare.AgFeeFXCode}
+		}
+		if in.Filter.NeedPassNetpriceAndSysfee {
+			opt.NetPriceDetail = &domain.PriceSimple{Value: adultFare.NetPrice, FXCode: adultFare.NetPriceFXCode}
+			opt.SysFeeDetail = &domain.PriceSimple{Value: adultFare.SysFee, FXCode: adultFare.SysFeeFXCode}
+		}
 	}
 	tr.TravelOptions = []domain.TravelOption{opt}
 
@@ -391,4 +423,31 @@ func reasonLetter2(param int) byte {
 		return 'y'
 	}
 	return 'n'
+}
+
+// buildFullRefundUntil calculates the full refund deadline, matching PHP
+// TravelOptionBaseFactory::buildFullRefundUntil().
+// Returns "YYYY-MM-DD HH:MM" or nil.
+func buildFullRefundUntil(raw domain.RawTrip) *string {
+	if !raw.IsFRefundable || raw.CancelHours == 0 {
+		return nil
+	}
+	loc, err := time.LoadLocation(raw.DepTimezoneName)
+	if err != nil {
+		return nil
+	}
+	depTime, err := time.ParseInLocation("2006-01-02 15:04:05", raw.Dep, loc)
+	if err != nil {
+		return nil
+	}
+	now := time.Now().In(loc)
+	if !now.Before(depTime) {
+		return nil
+	}
+	result := depTime.Add(-time.Duration(raw.CancelHours) * time.Hour)
+	if result.Before(now) {
+		return nil
+	}
+	s := result.Format("2006-01-02 15:04")
+	return &s
 }

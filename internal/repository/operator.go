@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
@@ -92,6 +93,55 @@ func (r *OperatorRepo) FindByIDs(ctx context.Context, ids []int) (map[int]domain
 	for _, row := range rows {
 		op := row.toOperator()
 		result[op.OperatorID] = op
+	}
+	return result, nil
+}
+
+// OperatorRating holds rating data from the operator_extra table.
+type OperatorRating struct {
+	OperatorID   int     `db:"operator_id"`
+	Rating       float64 `db:"rating"`
+	RatingsCount int     `db:"ratings_count"`
+}
+
+// FindOperatorRatings returns operator ratings from the operator_extra table,
+// matching PHP OperatorExtraRepository::getRatingsByOperatorIds().
+// Uses the same weighted average calculation: (1*c1 + 2*c2 + 3*c3 + 4*c4 + 5*c5) / (c1+c2+c3+c4+c5).
+func (r *OperatorRepo) FindOperatorRatings(ctx context.Context, operatorIDs []int) (map[int]OperatorRating, error) {
+	if len(operatorIDs) == 0 {
+		return map[int]OperatorRating{}, nil
+	}
+
+	c1 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll1')), '0') AS DECIMAL(20,4))"
+	c2 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll2')), '0') AS DECIMAL(20,4))"
+	c3 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll3')), '0') AS DECIMAL(20,4))"
+	c4 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll4')), '0') AS DECIMAL(20,4))"
+	c5 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll5')), '0') AS DECIMAL(20,4))"
+
+	weighted := fmt.Sprintf("(%s*1 + %s*2 + %s*3 + %s*4 + %s*5)", c1, c2, c3, c4, c5)
+	total := fmt.Sprintf("(%s + %s + %s + %s + %s)", c1, c2, c3, c4, c5)
+
+	baseQuery := fmt.Sprintf(`
+		SELECT o.operator_id,
+		       COALESCE(ROUND(%s / NULLIF(%s, 0), 2), 0) AS rating,
+		       CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingsCount')), '0') AS UNSIGNED) AS ratings_count
+		FROM operator_extra o
+		WHERE o.extra_type = 'rating'
+		  AND o.operator_id IN (?)`, weighted, total)
+
+	query, args, err := sqlx.In(baseQuery, operatorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("operator ratings IN expand: %w", err)
+	}
+
+	var rows []OperatorRating
+	if err := r.db.SelectContext(ctx, &rows, r.db.Rebind(query), args...); err != nil {
+		return nil, fmt.Errorf("operator ratings query: %w", err)
+	}
+
+	result := make(map[int]OperatorRating, len(rows))
+	for _, row := range rows {
+		result[row.OperatorID] = row
 	}
 	return result, nil
 }

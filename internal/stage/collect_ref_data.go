@@ -21,25 +21,29 @@ type EnrichedTrips struct {
 	Operators map[int]domain.Operator
 	Stations  map[int]domain.Station
 	Classes   map[int]domain.VehicleClass
+	Images    *domain.ImageCollection
 	Filter    domain.SearchFilter
 }
 
-// CollectRefDataStage batch-loads all reference data (operators, stations, classes) in parallel.
+// CollectRefDataStage batch-loads all reference data (operators, stations, classes, images) in parallel.
 type CollectRefDataStage struct {
 	stationRepo  *repository.StationRepo
 	operatorRepo *repository.OperatorRepo
 	classRepo    *repository.ClassRepo
+	imageRepo    *repository.ImageRepo
 }
 
 func NewCollectRefDataStage(
 	stationRepo *repository.StationRepo,
 	operatorRepo *repository.OperatorRepo,
 	classRepo *repository.ClassRepo,
+	imageRepo *repository.ImageRepo,
 ) *CollectRefDataStage {
 	return &CollectRefDataStage{
 		stationRepo:  stationRepo,
 		operatorRepo: operatorRepo,
 		classRepo:    classRepo,
+		imageRepo:    imageRepo,
 	}
 }
 
@@ -62,24 +66,44 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	operatorIDSet := make(map[int]struct{})
 	stationIDSet := make(map[int]struct{})
 	classIDSet := make(map[int]struct{})
+	routeIDSet := make(map[int]struct{})
+	pairSet := make(map[repository.OperatorClassPair]struct{})
 
 	for _, t := range in.AllTrips {
 		operatorIDSet[t.OperatorID] = struct{}{}
 		stationIDSet[t.DepStationID] = struct{}{}
 		stationIDSet[t.ArrStationID] = struct{}{}
 		classIDSet[t.ClassID] = struct{}{}
+		if t.RouteID > 0 {
+			routeIDSet[t.RouteID] = struct{}{}
+		}
+		pairSet[repository.OperatorClassPair{OperatorID: t.OperatorID, ClassID: t.ClassID}] = struct{}{}
 	}
 
 	operatorIDs := setToSlice(operatorIDSet)
 	stationIDs := setToSlice(stationIDSet)
 	classIDs := setToSlice(classIDSet)
+	routeIDs := setToSlice(routeIDSet)
+	pairs := make([]repository.OperatorClassPair, 0, len(pairSet))
+	for p := range pairSet {
+		pairs = append(pairs, p)
+	}
 
 	// Load all reference data in parallel
 	g, ctx := errgroup.WithContext(ctx)
 
+	var logos map[int][]any
+	var ratings map[int]repository.OperatorRating
+
 	g.Go(func() error {
 		var err error
 		out.Operators, err = s.operatorRepo.FindByIDs(ctx, operatorIDs)
+		return err
+	})
+
+	g.Go(func() error {
+		var err error
+		ratings, err = s.operatorRepo.FindOperatorRatings(ctx, operatorIDs)
 		return err
 	})
 
@@ -95,8 +119,44 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 		return err
 	})
 
+	// Image loading
+	g.Go(func() error {
+		var err error
+		logos, err = s.imageRepo.FindOperatorLogos(ctx, operatorIDs)
+		return err
+	})
+
+	g.Go(func() error {
+		var err error
+		out.Images, err = s.imageRepo.FindClassImages(ctx, pairs)
+		if err != nil {
+			return err
+		}
+		// Load custom class images into same collection
+		if err := s.imageRepo.LoadCustomClassImages(ctx, out.Images, pairs); err != nil {
+			return err
+		}
+		// Load route images into same collection
+		return s.imageRepo.LoadRouteImages(ctx, out.Images, routeIDs)
+	})
+
 	if err := g.Wait(); err != nil {
 		return out, err
+	}
+
+	// Merge logos and ratings into operators
+	for opID, logo := range logos {
+		if op, ok := out.Operators[opID]; ok {
+			op.Logo = logo
+			out.Operators[opID] = op
+		}
+	}
+	for opID, r := range ratings {
+		if op, ok := out.Operators[opID]; ok {
+			op.RatingAvg = r.Rating
+			op.RatingCount = r.RatingsCount
+			out.Operators[opID] = op
+		}
 	}
 
 	return out, nil

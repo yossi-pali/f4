@@ -20,6 +20,10 @@ func (m *mockDataSecRepo) GetRestrictions(_ context.Context, _ int) (repository.
 	return m.restrictions, m.err
 }
 
+func (m *mockDataSecRepo) HasOperationPermission(_ context.Context, _ int, _ string) (bool, error) {
+	return false, nil
+}
+
 // mockWhiteLabelRepo returns configurable WhiteLabelConfig.
 type mockWhiteLabelRepo struct {
 	config repository.WhiteLabelConfig

@@ -20,6 +20,7 @@ type BuildFilterInput struct {
 // dataSecProvider is a local interface for security restriction queries.
 type dataSecProvider interface {
 	GetRestrictions(ctx context.Context, agentID int) (repository.SecurityRestrictions, error)
+	HasOperationPermission(ctx context.Context, agentID int, objectID string) (bool, error)
 }
 
 // whiteLabelProvider is a local interface for white-label config queries.
@@ -119,6 +120,20 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 	// Vehclass filter from query param
 	if p.VehclassID != "" {
 		filter.VehclassIDs = append(filter.VehclassIDs, p.VehclassID)
+	}
+
+	// Price visibility flags (matching PHP TravelOptionBaseFactory)
+	// isNeedPassTopup: agent logged in OR reseller user
+	agentLoggedIn := in.Agent.AgentID > 0
+	filter.NeedPassTopup = agentLoggedIn
+
+	// isNeedPassNetpriceAndSysfee: agent has api_pass_netprice_sysfee permission
+	if agentLoggedIn {
+		hasPerm, err := s.dataSecRepo.HasOperationPermission(ctx, in.Agent.AgentID, "api_pass_netprice_sysfee")
+		if err != nil {
+			return filter, err
+		}
+		filter.NeedPassNetpriceAndSysfee = hasPerm
 	}
 
 	return filter, nil

@@ -55,6 +55,10 @@ type SearchFilter struct {
 
 	// Admin
 	WithAdminLinks bool
+
+	// Price visibility (computed from agent permissions, matching PHP TravelOptionBaseFactory)
+	NeedPassTopup              bool // agent logged in OR reseller → include agfee + price_restriction
+	NeedPassNetpriceAndSysfee  bool // agent has api_pass_netprice_sysfee permission → include netprice + sysfee
 }
 
 // SearchParams holds the raw query parameters parsed from an HTTP request.

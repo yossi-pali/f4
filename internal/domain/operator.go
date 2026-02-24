@@ -12,6 +12,7 @@ type Operator struct {
 	RatingCount   int     `json:"rating_count,omitempty"`
 	Code          *string `json:"-"`              // operator_code column
 	CounterpartID int     `json:"-"`              // from seller table
+	Logo          []any   `json:"-"`              // 5-element array: [path, width, height, type, order]
 }
 
 // Seller represents a seller/aggregator company.

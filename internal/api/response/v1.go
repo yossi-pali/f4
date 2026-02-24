@@ -125,30 +125,44 @@ type SegmentV1 struct {
 
 // TravelOptionV1 matches PHP TravelOptionApiV1.
 type TravelOptionV1 struct {
-	ID                  string        `json:"id"`
-	Bookable            int           `json:"bookable"`
-	Price               *PriceV1      `json:"price"`
-	Buy                 []BuyItemV1   `json:"buy"`
-	Labels              []any         `json:"labels"`
-	Features            any           `json:"features"`
-	Class               int           `json:"class"`
-	Amenities           []string      `json:"amenities"`
-	TicketType          string        `json:"ticket_type"`
-	ConfirmationTime    int           `json:"confirmation_time"`
-	ConfirmationMinutes int           `json:"confirmation_minutes"`
-	ConfirmationMessage string        `json:"confirmation_message"`
-	Cancellation        int           `json:"cancellation"`
-	FullRefundUntil     *string       `json:"full_refund_until"`
-	CancellationMessage string        `json:"cancellation_message"`
-	Baggage             any           `json:"baggage"`
-	Rating              any           `json:"rating"`
-	RatingCount         int           `json:"rating_count"`
-	Photos              []any         `json:"photos"`
-	IsBookable          int           `json:"is_bookable"`
-	Reason              any           `json:"reason"`
-	BookingURI          *string       `json:"booking_uri"`
-	BookingsLastMonth   int           `json:"bookings_last_month"`
-	SalesSorting        float64       `json:"sales_sorting"`
+	ID                  string          `json:"id"`
+	Bookable            int             `json:"bookable"`
+	Price               *PriceV1        `json:"price"`
+	Buy                 []BuyItemV1     `json:"buy"`
+	Labels              []any           `json:"labels"`
+	Features            any             `json:"features"`
+	Class               int             `json:"class"`
+	Amenities           []string        `json:"amenities"`
+	TicketType          string          `json:"ticket_type"`
+	ConfirmationTime    int             `json:"confirmation_time"`
+	ConfirmationMinutes int             `json:"confirmation_minutes"`
+	ConfirmationMessage string          `json:"confirmation_message"`
+	Cancellation        int             `json:"cancellation"`
+	FullRefundUntil     *string         `json:"full_refund_until"`
+	CancellationMessage string          `json:"cancellation_message"`
+	Baggage             any             `json:"baggage"`
+	Rating              any             `json:"rating"`
+	RatingCount         int             `json:"rating_count"`
+	Photos              []any           `json:"photos"`
+	IsBookable          int             `json:"is_bookable"`
+	Reason              any             `json:"reason"`
+	BookingURI          *string         `json:"booking_uri"`
+	BookingsLastMonth   int             `json:"bookings_last_month"`
+	SalesSorting        float64         `json:"sales_sorting"`
+	AgFee               *PriceV1        `json:"agfee,omitempty"`
+	NetPrice            *PriceV1        `json:"netprice,omitempty"`
+	SysFee              *PriceV1        `json:"sysfee,omitempty"`
+	PriceRestriction    *int            `json:"price_restriction,omitempty"`
+	ClientPrice         *PartnerPriceV1 `json:"client_price,omitempty"`
+	SellerPrice         *PartnerPriceV1 `json:"seller_price,omitempty"`
+}
+
+// PartnerPriceV1 matches PHP DetailedPartnerPrice DTO.
+type PartnerPriceV1 struct {
+	FXCode     string  `json:"fxcode"`
+	NetPrice   float64 `json:"netprice"`
+	SysFee     float64 `json:"sysfee"`
+	PartnerFee float64 `json:"partnerfee"`
 }
 
 // BuyItemV1 matches PHP BuyItem DTO.
@@ -254,13 +268,18 @@ func operatorToV1(o domain.Operator) OperatorV1 {
 		rating = o.RatingAvg
 	}
 
+	var logo any
+	if len(o.Logo) > 0 {
+		logo = o.Logo
+	}
+
 	return OperatorV1{
 		ID:                 o.OperatorID,
 		MasterID:           masterID,
 		Name:               o.Name,
 		Slug:               o.Slug,
 		Code:               code,
-		Logo:               nil, // TODO: load from image table
+		Logo:               logo,
 		ShowSeatsAvailable: true,
 		CounterpartID:      o.CounterpartID,
 		Rating:             rating,
@@ -445,7 +464,7 @@ func travelOptionToV1(o domain.TravelOption) TravelOptionV1 {
 		buyItems = []BuyItemV1{}
 	}
 
-	return TravelOptionV1{
+	result := TravelOptionV1{
 		ID:                  o.ID,
 		Bookable:            o.Bookable,
 		Price:               price,
@@ -471,4 +490,35 @@ func travelOptionToV1(o domain.TravelOption) TravelOptionV1 {
 		BookingsLastMonth:   o.BookingsLastMonth,
 		SalesSorting:        o.SalesSorting,
 	}
+
+	// Price breakdown fields (conditionally included when fare data is available)
+	if o.AgFee != nil {
+		result.AgFee = &PriceV1{Value: o.AgFee.Value, FXCode: o.AgFee.FXCode}
+		pr := o.PriceRestriction
+		result.PriceRestriction = &pr
+	}
+	if o.NetPriceDetail != nil {
+		result.NetPrice = &PriceV1{Value: o.NetPriceDetail.Value, FXCode: o.NetPriceDetail.FXCode}
+	}
+	if o.SysFeeDetail != nil {
+		result.SysFee = &PriceV1{Value: o.SysFeeDetail.Value, FXCode: o.SysFeeDetail.FXCode}
+	}
+	// client_price / seller_price (no currency conversion yet, emit in native fxcode)
+	if o.NetPriceDetail != nil && o.SysFeeDetail != nil && o.AgFee != nil {
+		fx := o.NetPriceDetail.FXCode
+		result.ClientPrice = &PartnerPriceV1{
+			FXCode:     fx,
+			NetPrice:   o.NetPriceDetail.Value,
+			SysFee:     o.SysFeeDetail.Value,
+			PartnerFee: o.AgFee.Value,
+		}
+		result.SellerPrice = &PartnerPriceV1{
+			FXCode:     fx,
+			NetPrice:   o.NetPriceDetail.Value,
+			SysFee:     o.SysFeeDetail.Value,
+			PartnerFee: o.AgFee.Value,
+		}
+	}
+
+	return result
 }

@@ -227,4 +227,10 @@ type TravelOption struct {
 	DepGodate         string // "YYYY-MM-DD-HH-MM-SS"
 	DepGodate2        *string
 	DepGodate3        *string
+
+	// Price breakdown (from PriceFare["adult"])
+	AgFee            *PriceSimple // API output "agfee"
+	NetPriceDetail   *PriceSimple // API output "netprice"
+	SysFeeDetail     *PriceSimple // API output "sysfee"
+	PriceRestriction int          // from seller table
 }

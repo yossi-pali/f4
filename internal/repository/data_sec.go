@@ -135,6 +135,43 @@ func (r *DataSecRepo) GetRestrictions(ctx context.Context, agentID int) (Securit
 	return sec, nil
 }
 
+// HasOperationPermission checks if an agent has R or W access to a specific
+// operation object_id. Matches PHP ApiAgent::isNeedPassSysfeeAndNetprice() logic.
+func (r *DataSecRepo) HasOperationPermission(ctx context.Context, agentID int, objectID string) (bool, error) {
+	if agentID <= 0 || r.db == nil {
+		return false, nil
+	}
+
+	operationFields := []string{objectID}
+	query, args, err := sqlx.In(`
+		SELECT object, object_id, access
+		FROM data_sec
+		WHERE usr_id = ? AND object = 'operation' AND object_id IN (?)
+		UNION ALL
+		SELECT dsr.object, dsr.object_id, dsr.access
+		FROM data_sec_role dsr
+		JOIN usr u ON u.role_id = dsr.role_id
+		WHERE u.usr_id = ? AND dsr.object = 'operation' AND dsr.object_id IN (?)`,
+		agentID, operationFields,
+		agentID, operationFields,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	var rows []dataSecRow
+	if err := r.db.SelectContext(ctx, &rows, r.db.Rebind(query), args...); err != nil {
+		return false, err
+	}
+
+	for _, row := range rows {
+		if strings.Contains(row.Access, "R") || strings.Contains(row.Access, "W") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func toInts(ss []string) []int {
 	var result []int
 	for _, s := range ss {
