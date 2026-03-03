@@ -11,8 +11,9 @@ import (
 
 // CollectRefDataInput is the input for Stage 6.
 type CollectRefDataInput struct {
-	AllTrips []domain.RawTrip
-	Filter   domain.SearchFilter
+	AllTrips       []domain.RawTrip
+	AllStationIDs  []int // station IDs from ALL raw trips (before filtering), for station collection
+	Filter         domain.SearchFilter
 }
 
 // EnrichedTrips is the output of Stage 6.
@@ -23,7 +24,7 @@ type EnrichedTrips struct {
 	Classes     map[int]domain.VehicleClass
 	Images      *domain.ImageCollection
 	ReasonTexts map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
-	ManualIntegrationID int    // integration_id for integration_code='manual' (fallback for sellers without integration row)
+	ManualIntegrationID int // integration_id for integration_code='manual' (fallback for sellers without integration row)
 	Filter      domain.SearchFilter
 }
 
@@ -94,6 +95,13 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 		if t.Price.ReasonID > 0 {
 			reasonIDSet[t.Price.ReasonID] = struct{}{}
 		}
+	}
+
+	// Also include station IDs collected from all raw trips before filtering.
+	// PHP collects stations before filtering meta/daytrip trips, so some stations
+	// appear in the response even when no visible trip references them.
+	for _, id := range in.AllStationIDs {
+		stationIDSet[id] = struct{}{}
 	}
 
 	operatorIDs := setToSlice(operatorIDSet)

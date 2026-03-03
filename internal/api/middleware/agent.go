@@ -18,8 +18,11 @@ func AgentExtraction(next http.Handler) http.Handler {
 			Referer: r.Header.Get("Referer"),
 		}
 
-		// Extract agent ID from header or query
+		// Extract agent ID from header or query param.
+		// PHP AuthenticationListener uses $request->get('a') for agent init.
 		if idStr := r.Header.Get("X-Agent-ID"); idStr != "" {
+			agent.AgentID, _ = strconv.Atoi(idStr)
+		} else if idStr := r.URL.Query().Get("a"); idStr != "" {
 			agent.AgentID, _ = strconv.Atoi(idStr)
 		} else if idStr := r.URL.Query().Get("agent_id"); idStr != "" {
 			agent.AgentID, _ = strconv.Atoi(idStr)

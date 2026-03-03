@@ -48,11 +48,16 @@ type dataSecRow struct {
 	Access   string `db:"access"`
 }
 
+// maxOwnAgentID matches PHP ApplicationGlobals::MAX_OWN_AGENT_ID.
+// Internal agents (ID 1–50) skip security restrictions entirely.
+const maxOwnAgentID = 50
+
 // GetRestrictions returns security restrictions for an agent.
 // Queries both data_sec (user-level) and data_sec_role (role-level) tables.
+// Matching PHP DataSecManager: agents with ID <= MAX_OWN_AGENT_ID skip restrictions.
 func (r *DataSecRepo) GetRestrictions(ctx context.Context, agentID int) (SecurityRestrictions, error) {
 	var sec SecurityRestrictions
-	if agentID <= 0 || r.db == nil {
+	if agentID <= 0 || agentID <= maxOwnAgentID || r.db == nil {
 		return sec, nil
 	}
 

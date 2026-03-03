@@ -60,7 +60,7 @@ func parseSearchParams(r *http.Request) domain.SearchParams {
 	q := r.URL.Query()
 	return domain.SearchParams{
 		Lang:            q.Get("l"),
-		SeatsAdult:      queryIntAny(q, 1, "a", "seats"),
+		SeatsAdult:      queryIntAny(q, 1, "seats_adult", "seats"),
 		SeatsChild:      queryInt(q, "c", 0),
 		SeatsInfant:     queryInt(q, "i", 0),
 		FXCode:          q.Get("fxcode"),
@@ -75,7 +75,22 @@ func parseSearchParams(r *http.Request) domain.SearchParams {
 		WithNonBookable: q.Get("with_non_bookable") == "1",
 		ExtendedFormat:  q.Get("extended") == "1",
 		Referer:         r.Header.Get("Referer"),
+		SearchURL:       buildSearchURL(r),
+		VisitorID:       q.Get("visitorId"),
 	}
+}
+
+// buildSearchURL reconstructs the request URL without query string,
+// matching PHP: $this->request->getUri() with query stripped.
+func buildSearchURL(r *http.Request) string {
+	scheme := "http"
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	return scheme + "://" + host + r.URL.Path
 }
 
 func queryInt(q map[string][]string, key string, def int) int {

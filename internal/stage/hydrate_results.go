@@ -183,6 +183,8 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		Price:           raw.Price,
 		TripKey:         raw.TripKey,
 		IntegrationCode: raw.IntegrationCode,
+		IntegrationID:   effectiveIntegrationID(raw, in.ManualIntegrationID),
+		ChunkKey:        buildRecheckChunkKey(raw, in.ManualIntegrationID),
 		DepartureTime:   raw.DepartureTime,
 		Departure2Time:  raw.Departure2Time,
 		Departure3Time:  raw.Departure3Time,
@@ -531,20 +533,25 @@ func nilIntIfZero(v int) *int {
 	return &v
 }
 
+// effectiveIntegrationID returns the corrected integration ID for a raw trip,
+// matching PHP's logic: when integrationCode is "manual" (no integration row)
+// and a manualIntegrationID is configured, use that instead of 0.
+func effectiveIntegrationID(raw domain.RawTrip, manualIntegrationID int) int {
+	if raw.IntegrationCode == "manual" && raw.IntegrationID == 0 && manualIntegrationID > 0 {
+		return manualIntegrationID
+	}
+	return raw.IntegrationID
+}
+
 // buildRecheckChunkKey computes the chunk_key (group key) matching PHP TripResultBaseFactory::getRecheckChunkKey().
 // PHP: integrationId + chunk_key field values joined by "-".
 func buildRecheckChunkKey(raw domain.RawTrip, manualIntegrationID int) string {
-	integrationCode := raw.IntegrationCode
-	integrationID := raw.IntegrationID
+	integrationID := effectiveIntegrationID(raw, manualIntegrationID)
 	chunkKey := raw.ChunkKey
 
-	// PHP: if (empty($integrationCode)) — Go COALESCE gives 'manual'/0 when no integration row
-	if integrationCode == "manual" && integrationID == 0 && manualIntegrationID > 0 {
-		integrationID = manualIntegrationID
-	}
-
-	// Overrides
-	if integrationCode == "manual" {
+	// PHP line 38: if ($integrationCode === 'manual') { $chunkKey = 'date'; }
+	// Unconditional override for all manual-integration trips (both LEFT JOIN matched and NULL fallback).
+	if raw.IntegrationCode == "manual" {
 		chunkKey = "date"
 	} else if raw.VehclassID == "train" && strings.Contains(raw.IntegrationCode, "easybook") {
 		chunkKey = "vehclass_id,dep_station_id,arr_station_id"
@@ -559,7 +566,11 @@ func buildRecheckChunkKey(raw domain.RawTrip, manualIntegrationID int) string {
 			continue
 		}
 		if field == "date" {
-			t := time.Unix(raw.Godate, 0).UTC()
+			// PHP uses date('Y-m-d', $rawTrip['godate']) with default timezone Asia/Bangkok
+			// (set in docker/php.ini: date.timezone = Asia/Bangkok).
+			// We must match that: interpret the godate Unix timestamp in Bangkok timezone.
+			loc, _ := time.LoadLocation("Asia/Bangkok")
+			t := time.Unix(raw.Godate, 0).In(loc)
 			values = append(values, t.Format("2006-01-02"))
 			continue
 		}

@@ -63,6 +63,10 @@ type SearchFilter struct {
 	// Price visibility (computed from agent permissions, matching PHP TravelOptionBaseFactory)
 	NeedPassTopup              bool // agent logged in OR reseller → include agfee + price_restriction
 	NeedPassNetpriceAndSysfee  bool // agent has api_pass_netprice_sysfee permission → include netprice + sysfee
+
+	// Request context for recheck URL generation (matching PHP Rechecker)
+	SearchURL string // original request URL without query string
+	VisitorID string // unique visitor tracking ID
 }
 
 // SearchParams holds the raw query parameters parsed from an HTTP request.
@@ -85,6 +89,10 @@ type SearchParams struct {
 	Referer         string
 	FromStations    []int // for searchByStations endpoint
 	ToStations      []int
+
+	// Request context for recheck URLs
+	SearchURL string // original request URL without query string
+	VisitorID string // unique visitor tracking ID
 }
 
 // AgentContext holds information about the API caller.

@@ -8,9 +8,10 @@ import (
 
 // FilteredTrips is the output of Stage 4.
 type FilteredTrips struct {
-	DirectTrips   []domain.RawTrip
-	ConnectionIDs []int // set_id values for Stage 5a
-	Filter        domain.SearchFilter
+	DirectTrips      []domain.RawTrip
+	ConnectionIDs    []int // set_id values for Stage 5a
+	AllStationIDs    []int // station IDs from ALL raw trips (before filtering), for station collection
+	Filter           domain.SearchFilter
 }
 
 // FilterRawTripsStage removes hidden, meta, daytrip duplicates, and separates connections.
@@ -25,6 +26,24 @@ func (s *FilterRawTripsStage) Execute(_ context.Context, in RawTripsResult) (Fil
 
 	if len(in.Trips) == 0 {
 		return out, nil
+	}
+
+	// Collect station IDs from ALL raw trips before filtering.
+	// PHP collects stations in prepareRawTrips which runs before trip-level
+	// filters like meta/daytrip, so some stations appear in the response
+	// even if no visible trip references them.
+	allStationSet := make(map[int]struct{}, len(in.Trips)*2)
+	for _, t := range in.Trips {
+		// PHP Search.php lines 291-308: only dep_hide trips are excluded before station collection
+		if t.DepHideDeparture {
+			continue
+		}
+		allStationSet[t.DepStationID] = struct{}{}
+		allStationSet[t.ArrStationID] = struct{}{}
+	}
+	out.AllStationIDs = make([]int, 0, len(allStationSet))
+	for id := range allStationSet {
+		out.AllStationIDs = append(out.AllStationIDs, id)
 	}
 
 	// Track operator+station pairs for daytrip detection

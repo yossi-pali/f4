@@ -129,6 +129,10 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 		filter.VehclassIDs = append(filter.VehclassIDs, p.VehclassID)
 	}
 
+	// Request context for recheck URL generation
+	filter.SearchURL = p.SearchURL
+	filter.VisitorID = p.VisitorID
+
 	// Price visibility flags (matching PHP TravelOptionBaseFactory)
 	// isNeedPassTopup: agent logged in OR reseller user
 	agentLoggedIn := in.Agent.AgentID > 0

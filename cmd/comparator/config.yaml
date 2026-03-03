@@ -8,8 +8,10 @@ endpoints:
       a: "1"
   new:
     base_url: "http://localhost:8080"
-    headers: {}
-    params: {}
+    headers:
+      Host: "recheck10.12go.asia"
+    params:
+      a: "1"
 
 # Dates to test — each scenario runs once per date
 dates:

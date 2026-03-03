@@ -115,8 +115,9 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 			all = append(all, ml.Connections...)
 			all = append(all, ml.Autopacks...)
 			return CollectRefDataInput{
-				AllTrips: all,
-				Filter:   filtered.Filter,
+				AllTrips:      all,
+				AllStationIDs: filtered.AllStationIDs,
+				Filter:        filtered.Filter,
 			}
 		},
 	)

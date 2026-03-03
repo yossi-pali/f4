@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,8 +52,8 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 		resp.Trips = []domain.TripResult{}
 	}
 
-	// Build recheck URLs
-	if len(in.RecheckTripKeys) > 0 {
+	// Build recheck URLs (one per integration chunk group, matching PHP Rechecker)
+	if len(in.RecheckGroups) > 0 {
 		resp.Recheck = s.buildRecheckURLs(in)
 	}
 	if resp.Recheck == nil {
@@ -70,39 +71,46 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 	return resp, nil
 }
 
+// buildRecheckURLs generates one URL per RecheckGroup, matching PHP Rechecker::getRecheckUrls.
+// URL is built manually (not via url.Values) to match PHP's exact parameter order and encoding:
+// commas in f/t are NOT percent-encoded; search_url IS percent-encoded.
 func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 	if s.recheckBaseURL == "" {
 		return nil
 	}
 
-	// Group recheck trip keys by batches (max ~50 per URL to avoid URL length limits)
-	const batchSize = 50
-	var urls []string
-
 	dateStr := in.Filter.Date.Format("2006-01-02")
-	fromIDs := intsToString(in.Filter.FromStationIDs)
-	toIDs := intsToString(in.Filter.ToStationIDs)
+	urls := make([]string, 0, len(in.RecheckGroups))
 
-	for i := 0; i < len(in.RecheckTripKeys); i += batchSize {
-		end := i + batchSize
-		if end > len(in.RecheckTripKeys) {
-			end = len(in.RecheckTripKeys)
+	for _, g := range in.RecheckGroups {
+		var b strings.Builder
+		b.WriteString(s.recheckBaseURL)
+		b.WriteString("?l=")
+		b.WriteString(in.Filter.Lang)
+		b.WriteString("&f=")
+		b.WriteString(intsToString(g.FromStationIDs))
+		b.WriteString("&t=")
+		b.WriteString(intsToString(g.ToStationIDs))
+		b.WriteString("&d=")
+		b.WriteString(dateStr)
+		b.WriteString("&i=")
+		b.WriteString(strconv.Itoa(g.IntegrationID))
+		b.WriteString("&sa=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsAdult))
+		b.WriteString("&sc=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsChild))
+		b.WriteString("&si=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsInfant))
+		b.WriteString("&a=")
+		b.WriteString(strconv.Itoa(in.Filter.AgentID))
+		if in.Filter.SearchURL != "" {
+			b.WriteString("&search_url=")
+			b.WriteString(url.QueryEscape(in.Filter.SearchURL))
 		}
-		batch := in.RecheckTripKeys[i:end]
+		b.WriteString("&visitorId=")
+		b.WriteString(in.Filter.VisitorID)
 
-		params := url.Values{}
-		params.Set("l", in.Filter.Lang)
-		params.Set("f", fromIDs)
-		params.Set("t", toIDs)
-		params.Set("d", dateStr)
-		params.Set("a", fmt.Sprintf("%d", in.Filter.SeatsAdult))
-		params.Set("c", fmt.Sprintf("%d", in.Filter.SeatsChild))
-		params.Set("i", fmt.Sprintf("%d", in.Filter.SeatsInfant))
-		params.Set("fxcode", in.Filter.FXCode)
-		params.Set("keys", strings.Join(batch, ","))
-
-		recheckURL := fmt.Sprintf("%s/recheck?%s", s.recheckBaseURL, params.Encode())
-		urls = append(urls, recheckURL)
+		urls = append(urls, b.String())
 	}
 
 	return urls

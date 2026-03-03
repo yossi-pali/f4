@@ -8,10 +8,20 @@ import (
 	"github.com/12go/f4/internal/domain"
 )
 
+// RecheckGroup represents one integration chunk that needs price rechecking.
+// Each group produces one recheck URL, matching PHP Rechecker::getRecheckUrls.
+type RecheckGroup struct {
+	ChunkKey       string
+	IntegrationID  int
+	FromStationIDs []int // paired with ToStationIDs by index (unique pairs)
+	ToStationIDs   []int
+}
+
 // FinalResults is the output of Stage 8.
 type FinalResults struct {
 	Trips               []domain.TripResult
-	RecheckTripKeys     []string
+	RecheckTripKeys     []string       // flat trip keys for event emission
+	RecheckGroups       []RecheckGroup // per-ChunkKey groups for URL generation
 	PresentIntegrations []string
 	Operators           map[int]domain.Operator
 	Stations            map[int]domain.Station
@@ -79,6 +89,15 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	integrationSet := make(map[string]struct{})
 	recheckKeySet := make(map[string]struct{})
 
+	// Recheck grouping by ChunkKey (matching PHP RecheckBuilder)
+	type recheckGroupData struct {
+		integrationID int
+		stationPairs  [][2]int // unique (from, to) pairs in insertion order
+		pairSet       map[[2]int]struct{}
+	}
+	recheckGroupMap := make(map[string]*recheckGroupData)
+	var recheckGroupOrder []string // insertion order of ChunkKeys
+
 	for _, key := range orderedKeys {
 		trip := grouped[key]
 
@@ -100,6 +119,21 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 			}
 			if !opt.Price.IsValid {
 				recheckKeySet[opt.TripKey] = struct{}{}
+				// Build recheck group by ChunkKey (matching PHP RecheckBuilder grouping)
+				gd, ok := recheckGroupMap[opt.ChunkKey]
+				if !ok {
+					gd = &recheckGroupData{
+						integrationID: opt.IntegrationID,
+						pairSet:       make(map[[2]int]struct{}),
+					}
+					recheckGroupMap[opt.ChunkKey] = gd
+					recheckGroupOrder = append(recheckGroupOrder, opt.ChunkKey)
+				}
+				pair := [2]int{opt.FromStationID, opt.ToStationID}
+				if _, exists := gd.pairSet[pair]; !exists {
+					gd.pairSet[pair] = struct{}{}
+					gd.stationPairs = append(gd.stationPairs, pair)
+				}
 				continue
 			}
 			// PHP: if ($trip->showUnavailable || $travelOption->bookable > 0)
@@ -137,6 +171,20 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	out.Trips = trips
 	for key := range recheckKeySet {
 		out.RecheckTripKeys = append(out.RecheckTripKeys, key)
+	}
+	for _, chunkKey := range recheckGroupOrder {
+		gd := recheckGroupMap[chunkKey]
+		g := RecheckGroup{
+			ChunkKey:       chunkKey,
+			IntegrationID:  gd.integrationID,
+			FromStationIDs: make([]int, len(gd.stationPairs)),
+			ToStationIDs:   make([]int, len(gd.stationPairs)),
+		}
+		for i, pair := range gd.stationPairs {
+			g.FromStationIDs[i] = pair[0]
+			g.ToStationIDs[i] = pair[1]
+		}
+		out.RecheckGroups = append(out.RecheckGroups, g)
 	}
 	for code := range integrationSet {
 		out.PresentIntegrations = append(out.PresentIntegrations, code)

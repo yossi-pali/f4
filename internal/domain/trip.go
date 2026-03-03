@@ -240,4 +240,8 @@ type TravelOption struct {
 	NetPriceDetail   *PriceSimple // API output "netprice"
 	SysFeeDetail     *PriceSimple // API output "sysfee"
 	PriceRestriction int          // from seller table
+
+	// Internal fields for recheck grouping (not serialized to JSON)
+	IntegrationID int    // integration row ID
+	ChunkKey      string // recheck chunk key (integrationID-field1-field2-...)
 }
