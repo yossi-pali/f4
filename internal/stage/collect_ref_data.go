@@ -17,20 +17,25 @@ type CollectRefDataInput struct {
 
 // EnrichedTrips is the output of Stage 6.
 type EnrichedTrips struct {
-	Trips     []domain.RawTrip
-	Operators map[int]domain.Operator
-	Stations  map[int]domain.Station
-	Classes   map[int]domain.VehicleClass
-	Images    *domain.ImageCollection
-	Filter    domain.SearchFilter
+	Trips       []domain.RawTrip
+	Operators   map[int]domain.Operator
+	Stations    map[int]domain.Station
+	Classes     map[int]domain.VehicleClass
+	Images      *domain.ImageCollection
+	ReasonTexts map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
+	ManualIntegrationID int    // integration_id for integration_code='manual' (fallback for sellers without integration row)
+	Filter      domain.SearchFilter
 }
 
 // CollectRefDataStage batch-loads all reference data (operators, stations, classes, images) in parallel.
 type CollectRefDataStage struct {
-	stationRepo  *repository.StationRepo
-	operatorRepo *repository.OperatorRepo
-	classRepo    *repository.ClassRepo
-	imageRepo    *repository.ImageRepo
+	stationRepo     *repository.StationRepo
+	operatorRepo    *repository.OperatorRepo
+	classRepo       *repository.ClassRepo
+	imageRepo       *repository.ImageRepo
+	reasonRepo      *repository.ReasonRepo
+	integrationRepo *repository.IntegrationRepo
+	tranRepo        *repository.TranRepo
 }
 
 func NewCollectRefDataStage(
@@ -38,12 +43,18 @@ func NewCollectRefDataStage(
 	operatorRepo *repository.OperatorRepo,
 	classRepo *repository.ClassRepo,
 	imageRepo *repository.ImageRepo,
+	reasonRepo *repository.ReasonRepo,
+	integrationRepo *repository.IntegrationRepo,
+	tranRepo *repository.TranRepo,
 ) *CollectRefDataStage {
 	return &CollectRefDataStage{
-		stationRepo:  stationRepo,
-		operatorRepo: operatorRepo,
-		classRepo:    classRepo,
-		imageRepo:    imageRepo,
+		stationRepo:     stationRepo,
+		operatorRepo:    operatorRepo,
+		classRepo:       classRepo,
+		imageRepo:       imageRepo,
+		reasonRepo:      reasonRepo,
+		integrationRepo: integrationRepo,
+		tranRepo:        tranRepo,
 	}
 }
 
@@ -69,6 +80,8 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	routeIDSet := make(map[int]struct{})
 	pairSet := make(map[repository.OperatorClassPair]struct{})
 
+	reasonIDSet := make(map[int]struct{})
+
 	for _, t := range in.AllTrips {
 		operatorIDSet[t.OperatorID] = struct{}{}
 		stationIDSet[t.DepStationID] = struct{}{}
@@ -78,6 +91,9 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 			routeIDSet[t.RouteID] = struct{}{}
 		}
 		pairSet[repository.OperatorClassPair{OperatorID: t.OperatorID, ClassID: t.ClassID}] = struct{}{}
+		if t.Price.ReasonID > 0 {
+			reasonIDSet[t.Price.ReasonID] = struct{}{}
+		}
 	}
 
 	operatorIDs := setToSlice(operatorIDSet)
@@ -90,10 +106,13 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	}
 
 	// Load all reference data in parallel
+	origCtx := ctx
 	g, ctx := errgroup.WithContext(ctx)
 
 	var logos map[int][]any
 	var ratings map[int]repository.OperatorRating
+	var classTranslations map[string]string
+	var weightOverrides map[int]int
 
 	g.Go(func() error {
 		var err error
@@ -119,6 +138,22 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 		return err
 	})
 
+	g.Go(func() error {
+		reasonIDs := setToSlice(reasonIDSet)
+		var err error
+		out.ReasonTexts, err = s.reasonRepo.FindReasonTexts(ctx, reasonIDs, in.Filter.Lang)
+		return err
+	})
+
+	// Manual integration lookup (for chunk_key computation)
+	g.Go(func() error {
+		manual, err := s.integrationRepo.FindByCode(ctx, "manual")
+		if err == nil {
+			out.ManualIntegrationID = manual.IntegrationID
+		}
+		return nil // non-fatal: fallback to 0
+	})
+
 	// Image loading
 	g.Go(func() error {
 		var err error
@@ -140,8 +175,44 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 		return s.imageRepo.LoadRouteImages(ctx, out.Images, routeIDs)
 	})
 
+	// Station weight overrides from page_override table
+	g.Go(func() error {
+		var err error
+		weightOverrides, err = s.stationRepo.FindStationWeightOverrides(ctx, stationIDs, in.Filter.PageURL)
+		if err != nil {
+			weightOverrides = nil // non-fatal: use original weights
+		}
+		return nil
+	})
+
 	if err := g.Wait(); err != nil {
 		return out, err
+	}
+
+	// Translate class names (matching PHP ClassCollector: $this->tran->translate($class['class_name']))
+	// Done after g.Wait because we need loaded class names first.
+	classNames := make([]string, 0, len(out.Classes))
+	for _, c := range out.Classes {
+		classNames = append(classNames, c.Name)
+	}
+	classTranslations, _ = s.tranRepo.TranslateMany(origCtx, classNames, in.Filter.Lang)
+	if len(classTranslations) > 0 {
+		for id, c := range out.Classes {
+			if translated, ok := classTranslations[c.Name]; ok {
+				c.Name = translated
+				out.Classes[id] = c
+			}
+		}
+	}
+
+	// Apply station weight overrides
+	if len(weightOverrides) > 0 {
+		for id, st := range out.Stations {
+			if w, ok := weightOverrides[id]; ok {
+				st.Weight = w
+				out.Stations[id] = st
+			}
+		}
 	}
 
 	// Merge logos and ratings into operators

@@ -118,6 +118,52 @@ func (r *StationRepo) FindStationsByIDs(ctx context.Context, ids []int) (map[int
 	return result, nil
 }
 
+// FindStationWeightOverrides returns page_override weight overrides for stations on a given page URL.
+// Matches PHP: LEFT JOIN page_override po ON po.page_url = :url AND param1 = CONCAT('dep_weight_', s.station_id)
+// Returns map of station_id → overridden weight.
+func (r *StationRepo) FindStationWeightOverrides(ctx context.Context, stationIDs []int, pageURL string) (map[int]int, error) {
+	if len(stationIDs) == 0 || pageURL == "" || r.db == nil {
+		return nil, nil
+	}
+
+	// Build param1 values: dep_weight_<station_id>
+	params := make([]string, len(stationIDs))
+	idByParam := make(map[string]int, len(stationIDs))
+	for i, id := range stationIDs {
+		p := fmt.Sprintf("dep_weight_%d", id)
+		params[i] = p
+		idByParam[p] = id
+	}
+
+	query, args, err := sqlx.In(
+		`SELECT param1, CONVERT(value1, SIGNED) AS weight
+		 FROM page_override
+		 WHERE page_url = ? AND param1 IN (?)`, pageURL, params)
+	if err != nil {
+		return nil, err
+	}
+
+	var rows []struct {
+		Param  string `db:"param1"`
+		Weight int    `db:"weight"`
+	}
+	if err := r.db.SelectContext(ctx, &rows, r.db.Rebind(query), args...); err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	result := make(map[int]int, len(rows))
+	for _, row := range rows {
+		if id, ok := idByParam[row.Param]; ok {
+			result[id] = row.Weight
+		}
+	}
+	return result, nil
+}
+
 // FindProvinceByID returns a single province by ID.
 func (r *StationRepo) FindProvinceByID(ctx context.Context, id int) (domain.Province, error) {
 	var p domain.Province

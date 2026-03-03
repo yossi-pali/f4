@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/12go/f4/internal/db"
@@ -24,6 +25,8 @@ func NewTripPoolRepo(connMgr *db.ConnectionManager, regionR db.RegionResolver) *
 type SearchParams struct {
 	FromStationIDs     []int
 	ToStationIDs       []int
+	FromPlaceID        string // e.g. "1p" — when set and ends with 'p', uses route_place join (PHP behavior)
+	ToPlaceID          string // e.g. "44p"
 	GodateString       string // "YYYY-MM-DD"
 	SeatsAdult         int
 	SeatsChild         int
@@ -136,6 +139,7 @@ type rawTripRow struct {
 	TripID             int     `db:"trip_id"`
 	RouteID            int     `db:"route_id"`
 	HideDays           int     `db:"hide_days"`
+	HideDaysIsSet      int     `db:"hide_days_is_set"`
 	AdvanceBook        int     `db:"advance_book"`
 	CancelHours        int     `db:"cancel_hours"`
 	ConfirmMinutes     int     `db:"confirm_minutes"`
@@ -180,7 +184,7 @@ func (row *rawTripRow) toDomainTrip() domain.RawTrip {
 		Amenities: row.Amenities, TicketType: row.TicketType, SRMarker: row.SRMarker,
 		IsMeta: row.IsMeta != 0, IsIgnoreGroupTime: row.IsIgnoreGroupTime != 0, IsFRefundable: row.IsFRefundable != 0,
 		TripID: row.TripID, RouteID: row.RouteID,
-		HideDays: row.HideDays, AdvanceBook: row.AdvanceBook,
+		HideDays: row.HideDays, HideDaysIsSet: row.HideDaysIsSet != 0, AdvanceBook: row.AdvanceBook,
 		CancelHours: row.CancelHours, ConfirmMinutes: row.ConfirmMinutes, AvgConfirmTime: row.AvgConfirmTime,
 		NewTripFlag: row.NewTripFlag != 0, SpecialDealFlag: row.SpecialDealFlag != 0,
 		RankScoreSales: row.RankScoreSales, RankScoreFormula: row.RankScoreFormula,
@@ -210,14 +214,34 @@ func (r *TripPoolRepo) buildSearchQuery(p SearchParams) (string, []interface{}) 
 	selectArgs = append(selectArgs, p.GodateString) // dep
 	selectArgs = append(selectArgs, p.GodateString) // arr
 
-	// --- FROM clause params (VALUES subqueries + trip_price join) ---
-	fromValues := buildValuesClause(p.FromStationIDs)
-	toValues := buildValuesClause(p.ToStationIDs)
-	for _, id := range p.FromStationIDs {
-		fromArgs = append(fromArgs, id)
-	}
-	for _, id := range p.ToStationIDs {
-		fromArgs = append(fromArgs, id)
+	// --- FROM clause: route_place join for place-to-place ('p'), VALUES union otherwise ---
+	// PHP uses trip_pool4_route_place → route_place_station → route_station → trip_pool4
+	// for place-to-place searches (both IDs end in 'p'). This constrains results to
+	// trips that belong to explicitly defined routes between those places.
+	var fromClauseSQL string
+	if strings.HasSuffix(p.FromPlaceID, "p") && strings.HasSuffix(p.ToPlaceID, "p") {
+		fromPlaceNum, _ := strconv.Atoi(p.FromPlaceID[:len(p.FromPlaceID)-1])
+		toPlaceNum, _ := strconv.Atoi(p.ToPlaceID[:len(p.ToPlaceID)-1])
+		fromClauseSQL = `(
+    SELECT DISTINCT tp.*
+    FROM trip_pool4_route_place rp
+    JOIN trip_pool4_route_place_station rps ON rps.route_place_id = rp.route_place_id
+    JOIN trip_pool4_route_station rs ON rs.route_station_id = rps.route_station_id
+    JOIN trip_pool4 tp ON tp.from_id = rs.from_id AND tp.to_id = rs.to_id
+    WHERE rp.from_place_type = 'p' AND rp.from_place_id = ? AND rp.to_place_type = 'p' AND rp.to_place_id = ?
+) tp`
+		fromArgs = append(fromArgs, fromPlaceNum, toPlaceNum)
+	} else {
+		fromValues := buildValuesClause(p.FromStationIDs)
+		toValues := buildValuesClause(p.ToStationIDs)
+		fromClauseSQL = fmt.Sprintf("(%s) sf\nSTRAIGHT_JOIN trip_pool4 tp ON sf.station_id = tp.from_id\nSTRAIGHT_JOIN (%s) st ON st.station_id = tp.to_id",
+			fromValues, toValues)
+		for _, id := range p.FromStationIDs {
+			fromArgs = append(fromArgs, id)
+		}
+		for _, id := range p.ToStationIDs {
+			fromArgs = append(fromArgs, id)
+		}
 	}
 	fromArgs = append(fromArgs, p.GodateString) // trip_price.godate = ?
 
@@ -339,6 +363,7 @@ SELECT DISTINCT
     COALESCE(tpe.trip_id, 0) AS trip_id,
     COALESCE(tpe.route_id, 0) AS route_id,
     COALESCE(tpe.hide_days, 0) AS hide_days,
+    (tpe.hide_days IS NOT NULL) AS hide_days_is_set,
     COALESCE(tpe.advance_book, 0) AS advance_book,
     COALESCE(tpe.cancel_hours, 0) AS cancel_hours,
     COALESCE(tpe.confirm_minutes, 0) AS confirm_minutes,
@@ -377,9 +402,7 @@ SELECT DISTINCT
         CONCAT(?, ' ', SEC_TO_TIME(COALESCE(trip_price.departure_time, tp.departure_time) * 60)),
         INTERVAL COALESCE(NULLIF(MAX(trip_price.duration), 0), tp.duration) MINUTE
     ) AS arr
-FROM (%s) sf
-STRAIGHT_JOIN trip_pool4 tp ON sf.station_id = tp.from_id
-STRAIGHT_JOIN (%s) st ON st.station_id = tp.to_id
+FROM %s
 JOIN station station_from ON station_from.station_id = tp.from_id
 JOIN province province_from ON province_from.province_id = station_from.province_id
 JOIN timezone timezone_from ON timezone_from.timezone_id = province_from.timezone_id
@@ -398,7 +421,7 @@ LEFT JOIN trip_pool4_departure_extra tpd ON tpd.trip_key = trip_price.trip_key
     AND tpd.departure3_time = trip_price.departure3_time
 WHERE %s
 GROUP BY tp.trip_key, trip_price.departure_time, trip_price.departure2_time, trip_price.departure3_time`,
-		fromValues, toValues, whereSQL)
+		fromClauseSQL, whereSQL)
 
 	if p.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", p.Limit)

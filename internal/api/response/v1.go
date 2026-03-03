@@ -142,7 +142,7 @@ type TravelOptionV1 struct {
 	CancellationMessage string          `json:"cancellation_message"`
 	Baggage             any             `json:"baggage"`
 	Rating              any             `json:"rating"`
-	RatingCount         int             `json:"rating_count"`
+	RatingCount         any             `json:"rating_count"`
 	Photos              []any           `json:"photos"`
 	IsBookable          int             `json:"is_bookable"`
 	Reason              any             `json:"reason"`

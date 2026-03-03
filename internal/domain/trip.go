@@ -42,6 +42,7 @@ type RawTrip struct {
 
 	// Trip extras
 	HideDays          int     `db:"hide_days"`
+	HideDaysIsSet     bool    // true when hide_days column is not NULL in DB
 	AdvanceBook       int     `db:"advance_book"`
 	CancelHours       int     `db:"cancel_hours"`
 	ConfirmMinutes    int     `db:"confirm_minutes"`
@@ -113,10 +114,11 @@ type TripResult struct {
 	Segments      []Segment
 	TravelOptions []TravelOption
 	Tags          []string
-	IsBookable    bool
-	HasValidPrice bool
-	IsConnection  bool
-	RankScore     float64
+	IsBookable      bool
+	HasValidPrice   bool
+	IsConnection    bool
+	ShowUnavailable bool // true when non-bookable options should still appear (hide_days=0 or within window)
+	RankScore       float64
 	SpecialDeal   bool
 	NewTrip       bool
 
@@ -204,7 +206,7 @@ type TravelOption struct {
 	ClassID           int
 	Bookable          int
 	Rating            *float64
-	RatingCount       int
+	RatingCount       *int // nil when DB value is 0/NULL (PHP: null)
 	Amenities         []string
 	TicketType        string
 	ConfirmationTime  int // days
@@ -227,6 +229,11 @@ type TravelOption struct {
 	DepGodate         string // "YYYY-MM-DD-HH-MM-SS"
 	DepGodate2        *string
 	DepGodate3        *string
+
+	// Per-option stats for aggregation during merge
+	Bookings30d     int
+	Bookings30dSolo int
+	ScoreSortingRaw float64 // calculateRankScoreBySales per option
 
 	// Price breakdown (from PriceFare["adult"])
 	AgFee            *PriceSimple // API output "agfee"

@@ -33,7 +33,7 @@ type Runner struct {
 // NewRunner creates a new Runner.
 func NewRunner(cfg *Config) *Runner {
 	return &Runner{
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 120 * time.Second},
 		cfg:    cfg,
 	}
 }

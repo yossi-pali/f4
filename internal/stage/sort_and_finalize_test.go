@@ -17,6 +17,10 @@ func (m *mockStationRepoForFinalize) GetParentProvinceName(_ context.Context, _ 
 }
 
 func makeTripResult(tripKey string, bookable, validPrice bool, rankScore float64, integrationCode string) domain.TripResult {
+	seats := 0
+	if bookable {
+		seats = 10
+	}
 	return domain.TripResult{
 		TripKey:       tripKey,
 		GroupKey:      tripKey, // unique group key for simplicity
@@ -28,6 +32,7 @@ func makeTripResult(tripKey string, bookable, validPrice bool, rankScore float64
 				TripKey:         tripKey,
 				IntegrationCode: integrationCode,
 				UniqueKey:       tripKey + "-opt1",
+				Bookable:        seats,
 				Price: domain.TripPrice{
 					IsValid:    validPrice,
 					PriceLevel: domain.PriceExact,
@@ -224,18 +229,19 @@ func TestSortAndFinalize_DedupTravelOptions(t *testing.T) {
 func TestSortAndFinalize_RecheckKeys(t *testing.T) {
 	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
 
-	// Trip with non-exact price should generate recheck key
+	// PHP ChiefCook: travel options with IsValid=false (no price binary or invalid price)
+	// go to recheck URLs, not main results.
 	trip := domain.TripResult{
 		TripKey:       "trip1",
 		GroupKey:      "trip1",
-		IsBookable:    true,
-		HasValidPrice: true,
+		IsBookable:    false,
+		HasValidPrice: false,
 		TravelOptions: []domain.TravelOption{
 			{
 				TripKey:         "trip1",
 				IntegrationCode: "int1",
 				UniqueKey:       "trip1-opt1",
-				Price:           domain.TripPrice{IsValid: true, PriceLevel: domain.PricePredict},
+				Price:           domain.TripPrice{IsValid: false, PriceLevel: domain.PriceExact},
 			},
 		},
 	}

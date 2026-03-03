@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"math"
 	"sort"
 
 	"github.com/12go/f4/internal/domain"
@@ -84,25 +85,36 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		// Dedup travel options
 		trip.TravelOptions = dedupTravelOptions(trip.TravelOptions)
 
-		// Filter non-bookable (unless admin)
-		if !in.Filter.WithNonBookable && !trip.IsBookable {
-			continue
-		}
+		// PHP ChiefCook: aggregate stats from ALL travel options BEFORE filtering.
+		// prepareMultiOptionTrip aggregates statistics; cookApiV1 aggregates params.
+		aggregateMultiOptionTrip(trip)
 
-		// Filter invalid prices (unless admin)
-		if !in.Filter.WithAdminLinks && !trip.HasValidPrice {
-			continue
-		}
-
-		// Collect integrations and recheck keys
+		// PHP ChiefCook.cookApiV1: splitToRecheck=true by default.
+		// Travel options without valid prices go to recheck only.
+		// Valid-price options only appear in main results if:
+		//   trip.showUnavailable (hide_days=0 or within window) OR bookable (Avail > 0) OR admin WithNonBookable.
+		validOpts := make([]domain.TravelOption, 0, len(trip.TravelOptions))
 		for _, opt := range trip.TravelOptions {
 			if opt.IntegrationCode != "" {
 				integrationSet[opt.IntegrationCode] = struct{}{}
 			}
-			if !opt.Price.IsValid || opt.Price.PriceLevel != domain.PriceExact {
+			if !opt.Price.IsValid {
 				recheckKeySet[opt.TripKey] = struct{}{}
+				continue
 			}
+			// PHP: if ($trip->showUnavailable || $travelOption->bookable > 0)
+			if !trip.ShowUnavailable && opt.Bookable <= 0 && !in.Filter.WithNonBookable {
+				continue
+			}
+			validOpts = append(validOpts, opt)
 		}
+
+		// If no travel options pass the filter, skip trip from main results.
+		if len(validOpts) == 0 {
+			continue
+		}
+		trip.TravelOptions = validOpts
+		trip.HasValidPrice = true
 
 		trips = append(trips, *trip)
 	}
@@ -131,6 +143,76 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	}
 
 	return out, nil
+}
+
+// aggregateMultiOptionTrip recalculates trip-level stats from all travel options,
+// matching PHP ChiefCook::prepareMultiOptionTrip + cookApiV1 aggregation.
+func aggregateMultiOptionTrip(trip *domain.TripResult) {
+	if len(trip.TravelOptions) <= 1 {
+		return
+	}
+
+	// Reset aggregated fields (PHP prepareMultiOptionTrip resets then re-aggregates)
+	trip.ParamsRatingCount = nil
+	trip.ParamsMinRating = nil
+	trip.ScoreSorting = 0
+	trip.SalesSorting = 0
+	trip.BookingsLastMonth = 0
+	trip.IsBookable = false
+
+	var totalBookings30d, totalBookings30dSolo int
+	var paramsRatingCount int
+
+	for _, opt := range trip.TravelOptions {
+		// PHP cookApiV1: params.ratingCount += travelOption.ratingCount (all options)
+		if opt.RatingCount != nil {
+			paramsRatingCount += *opt.RatingCount
+		}
+		// PHP cookApiV1: params.minRating = min(travelOption.rating) (all options)
+		if opt.Rating != nil {
+			if trip.ParamsMinRating == nil || *opt.Rating < *trip.ParamsMinRating {
+				r := *opt.Rating
+				trip.ParamsMinRating = &r
+			}
+		}
+		// PHP addTripStatistics: rankScore = max
+		if opt.ScoreSortingRaw > trip.ScoreSorting {
+			trip.ScoreSorting = opt.ScoreSortingRaw
+		}
+		// PHP addTripStatistics: salesSorting = max (AB test OFF)
+		// PHP uses $travelOption->rankSales (unconditional calculateRankSales),
+		// NOT the zeroed-out travel option sales_sorting.
+		optSales := rankSalesFromBookings(float64(opt.Bookings30d))
+		if optSales > trip.SalesSorting {
+			trip.SalesSorting = optSales
+		}
+		// PHP addTripStatistics: bookingsLastMonth = max
+		if opt.BookingsLastMonth > trip.BookingsLastMonth {
+			trip.BookingsLastMonth = opt.BookingsLastMonth
+		}
+		// PHP addTripStatistics: bookings30d += (sum)
+		totalBookings30d += opt.Bookings30d
+		totalBookings30dSolo += opt.Bookings30dSolo
+		// PHP prepareMultiOptionTrip: isBookable = isBookable || option.isBookable
+		if opt.IsBookable > 0 {
+			trip.IsBookable = true
+		}
+	}
+
+	if paramsRatingCount > 0 {
+		trip.ParamsRatingCount = &paramsRatingCount
+	}
+	// PHP: isSoloTraveler from aggregated bookings (soloTravelerMinBookings30d = 30)
+	trip.IsSoloTraveler = totalBookings30d >= 30 &&
+		float64(totalBookings30dSolo)/float64(totalBookings30d)*100 >= 30
+}
+
+// rankSalesFromBookings matches PHP calculateRankSales (RANK_SCORE_SALES_REAL_MULTIPLIER = 40).
+func rankSalesFromBookings(bookings30d float64) float64 {
+	if bookings30d >= 1.0 {
+		return math.Log(bookings30d * 40)
+	}
+	return 0
 }
 
 func dedupTravelOptions(opts []domain.TravelOption) []domain.TravelOption {

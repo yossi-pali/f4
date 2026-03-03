@@ -55,6 +55,10 @@ type SearchFilter struct {
 
 	// Admin
 	WithAdminLinks bool
+	IsBot          bool
+
+	// Page URL for station weight overrides (e.g., "travel/bangkok/chiang-mai")
+	PageURL string
 
 	// Price visibility (computed from agent permissions, matching PHP TravelOptionBaseFactory)
 	NeedPassTopup              bool // agent logged in OR reseller → include agfee + price_restriction

@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/12go/f4/internal/domain"
@@ -75,7 +76,13 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 		IntegrationCode: p.IntegrationCode,
 		RecheckAmount:   p.RecheckAmount,
 		WithAdminLinks:  in.Agent.IsAdmin,
+		IsBot:           in.Agent.IsBot,
 		WithAutopacks:   s.features.Enabled(feature.Autopacks),
+	}
+
+	// Build page URL for station weight overrides (matching PHP SearchFilterBuilder)
+	if rp.FromPlace.Name != "" && rp.ToPlace.Name != "" {
+		filter.PageURL = "travel/" + phpSlug(rp.FromPlace.Name) + "/" + phpSlug(rp.ToPlace.Name)
 	}
 
 	if filter.Lang == "" {
@@ -137,6 +144,26 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 	}
 
 	return filter, nil
+}
+
+// phpSlug matches PHP Slugger::slug — applies URL_CODE replacements in order.
+func phpSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	// PHP applies replacements in this exact order (str_replace with arrays):
+	// '=' → '|', ' - ' → '=', '-' → '_', '#' → '-23-', '$' → '-24-',
+	// '%' → '-25-', '&' → '-26-', '?' → '-3f-', ' ' → '-'
+	r := strings.NewReplacer(
+		"=", "|",
+		" - ", "=",
+		"-", "_",
+		"#", "-23-",
+		"$", "-24-",
+		"%", "-25-",
+		"&", "-26-",
+		"?", "-3f-",
+		" ", "-",
+	)
+	return r.Replace(s)
 }
 
 // intersectInts returns the intersection of two int slices. If a is empty, returns b.

@@ -39,6 +39,8 @@ func (s *QueryTripsStage) Execute(ctx context.Context, filter domain.SearchFilte
 	params := repository.SearchParams{
 		FromStationIDs:     filter.FromStationIDs,
 		ToStationIDs:       filter.ToStationIDs,
+		FromPlaceID:        filter.FromPlaceID,
+		ToPlaceID:          filter.ToPlaceID,
 		GodateString:       filter.Date.Format("2006-01-02"),
 		SeatsAdult:         filter.SeatsAdult,
 		SeatsChild:         filter.SeatsChild,

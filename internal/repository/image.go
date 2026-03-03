@@ -52,10 +52,7 @@ func (r *ImageRepo) FindOperatorLogos(ctx context.Context, operatorIDs []int) (m
 		if row.Width == 0 || row.Height == 0 {
 			continue
 		}
-		// Only keep first logo per operator
-		if _, ok := result[row.OperatorID]; ok {
-			continue
-		}
+		// PHP overwrites: last logo per operator wins (matching PHP OperatorCollector behavior)
 		result[row.OperatorID] = []any{row.Path, row.Width, row.Height, domain.ImageTypeOperatorLogo, 0}
 	}
 	return result, nil

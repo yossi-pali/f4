@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/12go/f4/internal/domain"
@@ -106,10 +107,10 @@ func TestHydrateResults_BasicTrip(t *testing.T) {
 		t.Errorf("option AvailableSeats = %d, want 45", opt.AvailableSeats)
 	}
 
-	// Check tags
-	expectedTags := []string{"wifi", "power", "ticket:eticket", "baggage:20kg", "refundable", "special_deal", "new"}
-	if len(trip.Tags) != len(expectedTags) {
-		t.Errorf("tags = %v, want %v", trip.Tags, expectedTags)
+	// Tags: PHP builds tags from segment-level route features, not trip-level amenities.
+	// Go returns empty tags to match PHP API v1 behavior.
+	if len(trip.Tags) != 0 {
+		t.Errorf("tags = %v, want empty", trip.Tags)
 	}
 }
 
@@ -222,11 +223,14 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 		ArrStationID:       4,
 		Dep:                "2026-02-06 18:57:00",
 		Arr:                "07.02.2026 07:15:00",
-		ChunkKey:           "127",
+		ChunkKey:           "",
 		OpBookable:         true,
-		IntegrationCode:    "manual",
-		RankScoreFormula:   18457,
-		RankScoreSales:     7.42,
+		IntegrationCode:    "srt",
+		IntegrationID:      127,
+		RankScoreFormula:       18457,
+		RankScoreSales:         7.42,
+		RankScoreSalesReal90:   10.0,
+		SalesPerMonth:      15,
 		Bookings30d:        15,
 		Bookings30dSolo:    3,
 		RatingAvg:          4.5,
@@ -275,11 +279,14 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 	if trip.TransferID == "" {
 		t.Error("expected non-empty TransferID")
 	}
-	if trip.ScoreSorting != 18457 {
-		t.Errorf("ScoreSorting = %f, want 18457", trip.ScoreSorting)
+	// ScoreSorting = calculateRankScoreBySales: 7.42 * 1.0 * 100 = 742
+	if trip.ScoreSorting != 742 {
+		t.Errorf("ScoreSorting = %f, want 742", trip.ScoreSorting)
 	}
-	if trip.SalesSorting != 7.42 {
-		t.Errorf("SalesSorting = %f, want 7.42", trip.SalesSorting)
+	// SalesSorting = calculateRankSales: log(Bookings30d * 40) = log(15 * 40) = log(600)
+	expectedSales := math.Log(600)
+	if math.Abs(trip.SalesSorting-expectedSales) > 0.01 {
+		t.Errorf("SalesSorting = %f, want %f", trip.SalesSorting, expectedSales)
 	}
 	if trip.BookingsLastMonth != 15 {
 		t.Errorf("BookingsLastMonth = %d, want 15", trip.BookingsLastMonth)
@@ -328,8 +335,8 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 	if opt.Rating == nil || *opt.Rating != 4.5 {
 		t.Errorf("opt.Rating = %v, want 4.5", opt.Rating)
 	}
-	if opt.RatingCount != 303 {
-		t.Errorf("opt.RatingCount = %d, want 303", opt.RatingCount)
+	if opt.RatingCount == nil || *opt.RatingCount != 303 {
+		t.Errorf("opt.RatingCount = %v, want 303", opt.RatingCount)
 	}
 	if len(opt.Amenities) != 3 {
 		t.Errorf("opt.Amenities = %v, want [aircon steward wc]", opt.Amenities)

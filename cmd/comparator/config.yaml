@@ -1,10 +1,11 @@
 endpoints:
   legacy:
-    base_url: "http://internal-k8s-f3albperf-44c6078471-1289140507.us-east-1.elb.amazonaws.com"
+    base_url: "http://localhost:8000"
     headers:
-      Host: "recheck10.12go.com"
+      Host: "recheck10.12go.asia"
     params:
       ref: "https://recheck10.12go.com"
+      a: "1"
   new:
     base_url: "http://localhost:8080"
     headers: {}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,25 +63,32 @@ func (s *HydrateResultsStage) getTripPhotos(raw domain.RawTrip, in EnrichedTrips
 }
 
 func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) domain.TripResult {
-	isBookable := raw.OpBookable && raw.Price.IsValid
+	// PHP: $travelOption->isBookable = op_bookable && available_seats > 0
+	isBookable := raw.OpBookable && raw.Price.Avail > 0
+
+	// PHP Search.php: $showUnavailable = $rawTrip['hide_days'] !== null && $isWebRequest &&
+	//   ($rawTrip['hide_days'] == 0 || ($now > $rawTrip['godate'] - (60 * 60 * 24 * $rawTrip['hide_days'])));
+	showUnavailable := raw.HideDaysIsSet && !in.Filter.IsBot &&
+		(raw.HideDays == 0 || time.Now().Unix() > raw.Godate-int64(raw.HideDays)*86400)
 
 	tr := domain.TripResult{
-		TripKey:       raw.TripKey,
-		IsBookable:    isBookable,
-		HasValidPrice: raw.Price.IsValid,
-		RankScore:     raw.RankScoreFormula,
-		SpecialDeal:   raw.SpecialDealFlag,
-		NewTrip:       raw.NewTripFlag,
-		IsConnection:  raw.SetID != nil || raw.Departure2Time > 0,
+		TripKey:         raw.TripKey,
+		IsBookable:      isBookable,
+		HasValidPrice:   raw.Price.IsValid,
+		ShowUnavailable: showUnavailable,
+		RankScore:       raw.RankScoreFormula,
+		SpecialDeal:     raw.SpecialDealFlag,
+		NewTrip:         raw.NewTripFlag,
+		IsConnection:    raw.SetID != nil || raw.Departure2Time > 0,
 
 		// PHP-matching fields
-		ChunkKey:               raw.ChunkKey,
+		ChunkKey:               buildRecheckChunkKey(raw, in.ManualIntegrationID),
 		RouteName:              "route name",
 		ShowMap:                true,
-		ScoreSorting:           raw.RankScoreFormula,
-		SalesSorting:           raw.RankScoreSales,
-		BookingsLastMonth:      raw.Bookings30d,
-		IsSoloTraveler:         raw.Bookings30d > 0 && raw.Bookings30dSolo == raw.Bookings30d,
+		ScoreSorting:           calculateRankScoreBySales(raw),
+		SalesSorting:           calculateRankSales(float64(raw.Bookings30d)),
+		BookingsLastMonth:      bucketSalesPerMonth(raw.SalesPerMonth),
+		IsSoloTraveler:         raw.Bookings30d >= 30 && float64(raw.Bookings30dSolo)/float64(raw.Bookings30d)*100 >= 30,
 		IsBoosted:              false,
 		OperatorReviewSnippets: []any{},
 		ConnectedWith:          nil,
@@ -88,7 +97,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		ParamsFrom:       raw.DepStationID,
 		ParamsTo:         raw.ArrStationID,
 		ParamsDepTime:    raw.Dep,
-		ParamsArrTime:    raw.Arr,
+		ParamsArrTime:    trimDateTime(raw.Arr),
 		ParamsDuration:   raw.Duration,
 		ParamsStops:      0,
 		ParamsVehclasses: splitVehclass(raw.VehclassID),
@@ -106,7 +115,8 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		tr.ParamsMinPrice = &domain.PriceSimple{Value: raw.Price.Total, FXCode: raw.Price.FXCode}
 	}
 
-	// Rating
+	// Rating: use trip-level ratings from trip_pool4_extra (tpe.rating_avg, tpe.rating_count).
+	// PHP FEATURE_OPERATOR_RATING_ON_TRIP_CARD is off for this comparison.
 	if raw.RatingAvg > 0 {
 		r := raw.RatingAvg
 		tr.ParamsMinRating = &r
@@ -114,8 +124,17 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		tr.ParamsRatingCount = &rc
 	}
 
-	// Reason
-	tr.ParamsReason = buildPriceReason(raw)
+	// Reason: PHP ChiefCook looks up reason text from trip_unavailable_reason table.
+	// Only shown for non-bookable trips; bookable trips have no blocking reason.
+	if !isBookable && raw.Price.ReasonID > 0 {
+		if text, ok := in.ReasonTexts[raw.Price.ReasonID]; ok {
+			reason := text
+			if raw.Price.ReasonParam > 0 {
+				reason = strings.Replace(reason, "[count]", fmt.Sprintf("%d", raw.Price.ReasonParam), 1)
+			}
+			tr.ParamsReason = reason
+		}
+	}
 
 	// TransferID = MD5(operatorID;fromID;toID;vehclassID;classID)
 	tr.TransferID = md5Hash(fmt.Sprintf("%d;%d;%d;%s;%d",
@@ -132,7 +151,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		FromStationID:       raw.DepStationID,
 		ToStationID:         raw.ArrStationID,
 		Departure:           raw.Dep,
-		Arrival:             raw.Arr,
+		Arrival:             trimDateTime(raw.Arr),
 		Duration:            raw.Duration,
 		OperatorID:          raw.OperatorID,
 		ClassID:             raw.ClassID,
@@ -155,7 +174,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 	// Departure2/3 are minutes-from-midnight; they don't produce godate2/3 for single-leg trips
 	// For connections, these would be populated differently
 
-	salesSorting := raw.RankScoreSales
+	salesSorting := calculateRankSales(float64(raw.Bookings30d))
 	if !isBookable {
 		salesSorting = 0
 	}
@@ -176,7 +195,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		ClassID:           raw.ClassID,
 		Bookable:          raw.Price.Avail,
 		Rating:            nilIfZero(raw.RatingAvg),
-		RatingCount:       raw.RatingCount,
+		RatingCount:       nilIntIfZero(raw.RatingCount),
 		Amenities:         splitAmenities(raw.Amenities),
 		TicketType:        defaultStr(raw.TicketType, "default"),
 		ConfirmationTime:  confirmDays(raw.ConfirmMinutes),
@@ -191,7 +210,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		Features:          []any{},
 		IsBookable:        boolToInt(isBookable),
 		Reason:            nil,
-		BookingsLastMonth: raw.Bookings30d,
+		BookingsLastMonth: bucketSalesPerMonth(raw.SalesPerMonth),
 		SalesSorting:      salesSorting,
 		BookingURL:        buildBookingURI(raw, depGodate),
 		Buy:               buildBuyItems(raw, depGodate),
@@ -201,6 +220,9 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		DepGodate2:        depGodate2,
 		DepGodate3:        depGodate3,
 		PriceRestriction:  raw.PriceRestriction,
+		Bookings30d:       raw.Bookings30d,
+		Bookings30dSolo:   raw.Bookings30dSolo,
+		ScoreSortingRaw:   calculateRankScoreBySales(raw),
 	}
 
 	// Price breakdown from adult fare (conditional, matching PHP TravelOptionBaseFactory)
@@ -215,8 +237,9 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 	}
 	tr.TravelOptions = []domain.TravelOption{opt}
 
-	// Build tags
-	tr.Tags = s.buildTags(raw)
+	// PHP builds tags from segment-level route features (RouteSegmentApiV1::tags),
+	// not from trip-level amenities/ticket_type. Leave empty for now.
+	tr.Tags = []string{}
 
 	return tr
 }
@@ -226,7 +249,7 @@ func (s *HydrateResultsStage) buildTags(raw domain.RawTrip) []string {
 
 	if raw.Amenities != "" {
 		for _, a := range strings.Split(raw.Amenities, ",") {
-			a = strings.TrimSpace(a)
+			a = strings.ToLower(strings.TrimSpace(a))
 			if a != "" {
 				tags = append(tags, a)
 			}
@@ -295,7 +318,7 @@ func splitAmenities(s string) []string {
 	parts := strings.Split(s, ",")
 	result := make([]string, 0, len(parts))
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
+		p = strings.ToLower(strings.TrimSpace(p))
 		if p != "" {
 			result = append(result, p)
 		}
@@ -320,6 +343,14 @@ func nilIfZero(f float64) *float64 {
 func defaultStr(s, def string) string {
 	if s == "" {
 		return def
+	}
+	return s
+}
+
+// trimDateTime strips any sub-second suffix (e.g. ".000000") from MySQL DATETIME strings.
+func trimDateTime(s string) string {
+	if len(s) > 19 {
+		return s[:19]
 	}
 	return s
 }
@@ -379,17 +410,36 @@ func cancelValue(hours int, refundable bool) int {
 
 func cancelMessage(hours int, refundable bool) string {
 	if !refundable && hours == 0 {
-		return "No refunds, no cancelation"
+		return "No refunds, no cancellation"
 	}
 	if refundable {
 		return fmt.Sprintf("Full refund up to %d hours before departure", hours)
 	}
-	return "No refunds, no cancelation"
+	return "No refunds, no cancellation"
 }
 
-func buildConfirmMessage(avgConfirmTime int) string {
-	_ = avgConfirmTime
-	return "Usually confirmed within avg_confirm_time_after_paid"
+// buildConfirmMessage formats the confirmation message from avg_confirm_time.
+// avg_confirm_time is stored in SECONDS in the DB (matching PHP AvgConfirmationTime service).
+func buildConfirmMessage(avgConfirmTimeSecs int) string {
+	if avgConfirmTimeSecs <= 0 {
+		return "Usually confirmed within avg_confirm_time_after_paid"
+	}
+	minutes := int(math.Ceil(float64(avgConfirmTimeSecs) / 60.0))
+	if minutes <= 5 {
+		return "Instant confirmation"
+	}
+	hours := int(math.Ceil(float64(avgConfirmTimeSecs) / 3600.0))
+	if hours < 24 {
+		if hours == 1 {
+			return "Usually confirmed within 1 hour after paid"
+		}
+		return fmt.Sprintf("Usually confirmed within %d hours after paid", hours)
+	}
+	days := int(math.Ceil(float64(hours) / 24.0))
+	if days == 1 {
+		return "Usually confirmed within 1 day after paid"
+	}
+	return fmt.Sprintf("Usually confirmed within %d days after paid", days)
 }
 
 func buildPriceReason(raw domain.RawTrip) string {
@@ -423,6 +473,120 @@ func reasonLetter2(param int) byte {
 		return 'y'
 	}
 	return 'n'
+}
+
+// calculateRankScoreBySales matches PHP TravelOptionBaseFactory::calculateRankScoreBySales().
+// Uses default parameters: rankScoreSalesMultiplierPct=100, newTripPenaltyFactor=0.01,
+// specialDealScoreFallback=0.1, specialDealMultiplier=10.0.
+func calculateRankScoreBySales(raw domain.RawTrip) float64 {
+	k := 1.0
+	if raw.NewTripFlag {
+		k = 0.01
+	}
+	score := raw.RankScoreSales * k * 100 // rankScoreSalesMultiplierPct=100
+	// rankScoreSysfee * (100-100) = 0, so sysfee term is zero with default config
+	if raw.SpecialDealFlag {
+		if score < 0.1 {
+			score = 0.1
+		}
+		return score * 10.0 // specialDealMultiplier / specialDealFlag(=1 when true)
+	}
+	return score
+}
+
+// calculateRankSales matches PHP TravelOptionBaseFactory::calculateRankSales().
+// RANK_SCORE_SALES_REAL_MULTIPLIER = 40.
+func calculateRankSales(bookings30d float64) float64 {
+	if bookings30d >= 1.0 {
+		return math.Log(bookings30d * 40)
+	}
+	return 0
+}
+
+// bucketSalesPerMonth matches PHP TravelOptionBaseFactory::convertTripRankScoreSalesReal().
+// It buckets sales_per_month into display-friendly tiers for bookings_last_month.
+func bucketSalesPerMonth(v int) int {
+	if v < 15 {
+		return 0
+	}
+	if v < 50 {
+		return 15
+	}
+	if v < 100 {
+		return 50
+	}
+	if v < 500 {
+		return 100
+	}
+	if v < 1000 {
+		return 500
+	}
+	return 1000
+}
+
+func nilIntIfZero(v int) *int {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
+// buildRecheckChunkKey computes the chunk_key (group key) matching PHP TripResultBaseFactory::getRecheckChunkKey().
+// PHP: integrationId + chunk_key field values joined by "-".
+func buildRecheckChunkKey(raw domain.RawTrip, manualIntegrationID int) string {
+	integrationCode := raw.IntegrationCode
+	integrationID := raw.IntegrationID
+	chunkKey := raw.ChunkKey
+
+	// PHP: if (empty($integrationCode)) — Go COALESCE gives 'manual'/0 when no integration row
+	if integrationCode == "manual" && integrationID == 0 && manualIntegrationID > 0 {
+		integrationID = manualIntegrationID
+	}
+
+	// Overrides
+	if integrationCode == "manual" {
+		chunkKey = "date"
+	} else if raw.VehclassID == "train" && strings.Contains(raw.IntegrationCode, "easybook") {
+		chunkKey = "vehclass_id,dep_station_id,arr_station_id"
+	}
+
+	fields := strings.Split(chunkKey, ",")
+	values := []string{strconv.Itoa(integrationID)}
+
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if field == "date" {
+			t := time.Unix(raw.Godate, 0).UTC()
+			values = append(values, t.Format("2006-01-02"))
+			continue
+		}
+		values = append(values, getRawTripField(raw, field))
+	}
+
+	return strings.Join(values, "-")
+}
+
+// getRawTripField returns a raw trip field value by name, matching PHP $rawTrip[$field].
+func getRawTripField(raw domain.RawTrip, field string) string {
+	switch field {
+	case "vehclass_id":
+		return raw.VehclassID
+	case "dep_station_id":
+		return strconv.Itoa(raw.DepStationID)
+	case "arr_station_id":
+		return strconv.Itoa(raw.ArrStationID)
+	case "operator_id":
+		return strconv.Itoa(raw.OperatorID)
+	case "class_id":
+		return strconv.Itoa(raw.ClassID)
+	case "official_id":
+		return raw.OfficialID
+	default:
+		return "?"
+	}
 }
 
 // buildFullRefundUntil calculates the full refund deadline, matching PHP
