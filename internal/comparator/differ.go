@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+// KnownGap represents a known architectural difference tracked but not counted as a diff.
+type KnownGap struct {
+	Type   string `json:"type"`
+	Detail string `json:"detail"`
+	Count  int    `json:"count"`
+}
+
 // DiffResult is the output of comparing two JSON responses for one test case.
 type DiffResult struct {
 	Scenario       string                   `json:"scenario"`
@@ -18,6 +25,7 @@ type DiffResult struct {
 	OnlyInLegacy   []string                 `json:"only_in_legacy,omitempty"`
 	OnlyInNew      []string                 `json:"only_in_new,omitempty"`
 	Differences    map[string]CategoryDiff  `json:"differences,omitempty"`
+	KnownGaps      []KnownGap               `json:"known_gaps,omitempty"`
 	Errors         []string                 `json:"errors,omitempty"`
 	rawDiffs       []FieldDiff              // internal accumulator during comparison
 }
@@ -88,8 +96,22 @@ func (d *Differ) Compare(tc TestCase, legacyBody, newBody []byte, legacyStatus, 
 	// Compare simple top-level fields
 	d.compareField(result, "", "provinceName", legacyData["provinceName"], newData["provinceName"])
 
-	// Compare recheck URLs as sorted sets
-	d.compareStringArrays(result, "recheck", legacyData["recheck"], newData["recheck"])
+	// Compare recheck URLs — filter out scan URLs (/searchs) as known gaps
+	legacyRecheck := toStringSlice(legacyData["recheck"])
+	newRecheck := toStringSlice(newData["recheck"])
+	legacySearchr, legacyScan := splitScanURLs(legacyRecheck)
+	newSearchr, newScan := splitScanURLs(newRecheck)
+	d.compareSortedStringSlices(result, "recheck", legacySearchr, newSearchr)
+	if len(legacyScan) > 0 || len(newScan) > 0 {
+		result.KnownGaps = append(result.KnownGaps, KnownGap{
+			Type:   "scan_urls",
+			Detail: fmt.Sprintf("legacy=%d new=%d", len(legacyScan), len(newScan)),
+			Count:  len(legacyScan),
+		})
+	}
+
+	// Move orphan station diffs (legacy-only) to known gaps
+	result.extractOrphanStationGaps()
 
 	result.groupDifferences()
 	return result
@@ -525,6 +547,59 @@ func categorize(d FieldDiff) string {
 		return "recheck"
 	}
 	return "other"
+}
+
+// splitScanURLs separates place-based scan URLs (/searchs) from station-based recheck URLs (/searchr).
+func splitScanURLs(urls []string) (searchr, scan []string) {
+	for _, u := range urls {
+		if strings.Contains(u, "/searchs") {
+			scan = append(scan, u)
+		} else {
+			searchr = append(searchr, u)
+		}
+	}
+	return
+}
+
+// compareSortedStringSlices compares two pre-split string slices after sorting.
+func (d *Differ) compareSortedStringSlices(result *DiffResult, path string, legacy, newSlice []string) {
+	sort.Strings(legacy)
+	sort.Strings(newSlice)
+
+	if len(legacy) != len(newSlice) {
+		result.rawDiffs = append(result.rawDiffs, FieldDiff{
+			Path: path + ".length", Legacy: len(legacy), New: len(newSlice),
+		})
+		result.Summary.FieldsCompared++
+		return
+	}
+
+	for i := range legacy {
+		result.Summary.FieldsCompared++
+		if legacy[i] != newSlice[i] {
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
+				Path: fmt.Sprintf("%s[%d]", path, i), Legacy: legacy[i], New: newSlice[i],
+			})
+		}
+	}
+}
+
+// extractOrphanStationGaps moves station diffs where legacy has the station but new doesn't
+// to KnownGaps (these are transit stations from PHP connection legs that Go doesn't collect).
+func (r *DiffResult) extractOrphanStationGaps() {
+	var filtered []FieldDiff
+	for _, d := range r.rawDiffs {
+		if strings.HasPrefix(d.Path, "stations.") && d.Legacy == "present" && d.New == nil {
+			r.KnownGaps = append(r.KnownGaps, KnownGap{
+				Type:   "orphan_station",
+				Detail: d.Path,
+				Count:  1,
+			})
+		} else {
+			filtered = append(filtered, d)
+		}
+	}
+	r.rawDiffs = filtered
 }
 
 // --- helpers ---

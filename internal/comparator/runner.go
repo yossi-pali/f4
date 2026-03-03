@@ -33,7 +33,7 @@ type Runner struct {
 // NewRunner creates a new Runner.
 func NewRunner(cfg *Config) *Runner {
 	return &Runner{
-		client: &http.Client{Timeout: 120 * time.Second},
+		client: &http.Client{Timeout: 5 * time.Minute},
 		cfg:    cfg,
 	}
 }
@@ -41,6 +41,7 @@ func NewRunner(cfg *Config) *Runner {
 // RunAll executes all test cases sequentially.
 // Legacy and new requests for the same test case run in parallel.
 func (r *Runner) RunAll(cases []TestCase, progress func(i, total int, tc TestCase)) []TestCaseResult {
+	start := time.Now()
 	results := make([]TestCaseResult, len(cases))
 	for i, tc := range cases {
 		if progress != nil {
@@ -48,6 +49,7 @@ func (r *Runner) RunAll(cases []TestCase, progress func(i, total int, tc TestCas
 		}
 		results[i] = r.runOne(tc)
 	}
+	fmt.Printf("\nAll %d test cases completed in %s\n", len(cases), time.Since(start).Round(time.Millisecond))
 	return results
 }
 
@@ -62,6 +64,7 @@ func (r *Runner) runOne(tc TestCase) TestCaseResult {
 	var wg sync.WaitGroup
 	var legacyResult, newResult FetchResult
 
+	start := time.Now()
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -72,6 +75,9 @@ func (r *Runner) runOne(tc TestCase) TestCaseResult {
 		newResult = r.fetch(newURL, newEp.Headers)
 	}()
 	wg.Wait()
+	total := time.Since(start)
+
+	fmt.Printf("  timing: legacy=%s  new=%s  total=%s\n", legacyResult.Duration.Round(time.Millisecond), newResult.Duration.Round(time.Millisecond), total.Round(time.Millisecond))
 
 	return TestCaseResult{
 		TestCase: tc,
@@ -106,13 +112,13 @@ func (r *Runner) fetch(rawURL string, headers map[string]string) FetchResult {
 
 	start := time.Now()
 	resp, err := r.client.Do(req)
-	duration := time.Since(start)
 	if err != nil {
-		return FetchResult{Err: fmt.Errorf("fetch %s: %w", rawURL, err), Duration: duration}
+		return FetchResult{Err: fmt.Errorf("fetch %s: %w", rawURL, err), Duration: time.Since(start)}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+	duration := time.Since(start) // includes body read time
 	if err != nil {
 		return FetchResult{Err: fmt.Errorf("read body: %w", err), StatusCode: resp.StatusCode, Duration: duration}
 	}

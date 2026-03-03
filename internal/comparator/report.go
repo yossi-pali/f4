@@ -14,6 +14,7 @@ type RunSummary struct {
 	Diffed         int                 `json:"diffed"`
 	Errored        int                 `json:"errored"`
 	Cases          []CaseSummary       `json:"cases"`
+	KnownGapTotals map[string]int      `json:"known_gap_totals,omitempty"`
 }
 
 // CaseSummary is a single test case in the summary.
@@ -26,6 +27,7 @@ type CaseSummary struct {
 	FieldsDiff     int            `json:"fields_different"`
 	CategoryCounts map[string]int `json:"category_counts,omitempty"`
 	Status         string         `json:"status"` // PASS, DIFF, ERROR
+	KnownGaps      []KnownGap    `json:"known_gaps,omitempty"`
 }
 
 // PrintReport prints a formatted summary table to stdout.
@@ -79,11 +81,25 @@ func PrintReport(summary *RunSummary, outputDir string) {
 			}
 			fmt.Printf("%*s  %s\n", maxName, "", strings.Join(parts, "  "))
 		}
+		if len(c.KnownGaps) > 0 {
+			var gapParts []string
+			for _, g := range c.KnownGaps {
+				gapParts = append(gapParts, fmt.Sprintf("%s(%s)", g.Type, g.Detail))
+			}
+			fmt.Printf("%*s  known gaps: %s\n", maxName, "", strings.Join(gapParts, "  "))
+		}
 	}
 
 	// Footer
 	fmt.Printf("\nTotal: %d test cases | %d PASS | %d DIFF | %d ERROR\n",
 		summary.TotalCases, summary.Passed, summary.Diffed, summary.Errored)
+	if len(summary.KnownGapTotals) > 0 {
+		fmt.Print("Known gaps:")
+		for gapType, count := range summary.KnownGapTotals {
+			fmt.Printf("  %s: %d", gapType, count)
+		}
+		fmt.Println()
+	}
 	fmt.Printf("Results saved to: %s\n\n", outputDir)
 }
 
@@ -116,7 +132,15 @@ func BuildSummary(timestamp string, floatTolerance float64, diffs []*DiffResult)
 			FieldsDiff:     d.Summary.FieldsDifferent,
 			CategoryCounts: d.Summary.CategoryCounts,
 			Status:         status,
+			KnownGaps:      d.KnownGaps,
 		})
+
+		for _, g := range d.KnownGaps {
+			if summary.KnownGapTotals == nil {
+				summary.KnownGapTotals = make(map[string]int)
+			}
+			summary.KnownGapTotals[g.Type] += g.Count
+		}
 	}
 
 	return summary
