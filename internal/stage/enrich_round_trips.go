@@ -6,6 +6,7 @@ import (
 	"github.com/12go/f4/internal/db"
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/event"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/price"
 	"github.com/12go/f4/internal/repository"
 )
@@ -62,7 +63,11 @@ func (s *EnrichRoundTripsStage) Execute(ctx context.Context, in EnrichRoundTrips
 	godateStr := in.Filter.Date.Format("2006-01-02")
 
 	// Look up cached round trip prices
+	pc := pipeline.FromContext(ctx)
+	const stage = "enrich_round_trips"
+	t := pc.StartTimer(stage, "price_lookup")
 	rtPrices, err := s.roundTripPriceRepo.FindByOutbound(ctx, region, outbound.TripKey, godateStr)
+	t.Stop()
 	if err != nil {
 		// Non-fatal: continue without round trip enrichment
 		return RoundTripEnrichedTrips{Trips: in.DirectTrips}, nil
@@ -94,6 +99,7 @@ func (s *EnrichRoundTripsStage) Execute(ctx context.Context, in EnrichRoundTrips
 	}
 
 	// Apply round trip discounts to matching inbound trips
+	t = pc.StartTimer(stage, "discount_apply")
 	trips := make([]domain.RawTrip, len(in.DirectTrips))
 	copy(trips, in.DirectTrips)
 
@@ -118,5 +124,6 @@ func (s *EnrichRoundTripsStage) Execute(ctx context.Context, in EnrichRoundTrips
 		}
 	}
 
+	t.Stop()
 	return RoundTripEnrichedTrips{Trips: trips}, nil
 }

@@ -53,11 +53,14 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 	}
 
 	// Build recheck URLs (one per integration chunk group, matching PHP Rechecker)
+	pc := pipeline.FromContext(ctx)
+	t := pc.StartTimer("serialize_response", "recheck_urls")
 	if len(in.RecheckGroups) > 0 || len(in.PackRecheckGroups) > 0 {
 		resp.Recheck = s.buildRecheckURLs(in)
 		// PHP Rechecker appends pack recheck URLs after regular recheck URLs
 		resp.Recheck = append(resp.Recheck, s.buildPackManualRecheckURLs(in)...)
 	}
+	t.Stop()
 	if resp.Recheck == nil {
 		resp.Recheck = []string{}
 	}
@@ -68,7 +71,9 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 	}
 
 	// Emit events (fire-and-forget, errors are non-fatal)
+	t = pc.StartTimer("serialize_response", "events")
 	s.emitEvents(ctx, in)
+	t.Stop()
 
 	return resp, nil
 }

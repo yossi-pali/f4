@@ -15,6 +15,16 @@ type Config struct {
 	EventBus EventBusConfig
 	Recheck  RecheckConfig
 	Features map[string]bool
+	RefCache RefCacheConfig
+}
+
+type RefCacheConfig struct {
+	EnableOperators   bool          `mapstructure:"enable_operators"`
+	EnableStations    bool          `mapstructure:"enable_stations"`
+	EnableClasses     bool          `mapstructure:"enable_classes"`
+	EnableReasons     bool          `mapstructure:"enable_reasons"`
+	EnableIntegration bool          `mapstructure:"enable_integration"`
+	RefreshTTL        time.Duration `mapstructure:"refresh_ttl"`
 }
 
 type ServerConfig struct {
@@ -24,8 +34,12 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Default  string            `mapstructure:"default"`
-	TripPool map[string]string `mapstructure:"trip_pool"` // region code → DSN
+	Default         string            `mapstructure:"default"`
+	TripPool        map[string]string `mapstructure:"trip_pool"` // region code → DSN
+	MaxOpenConns    int               `mapstructure:"max_open_conns"`
+	MaxIdleConns    int               `mapstructure:"max_idle_conns"`
+	ConnMaxLifetime time.Duration     `mapstructure:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration     `mapstructure:"conn_max_idle_time"`
 }
 
 type CacheConfig struct {
@@ -55,6 +69,10 @@ func Load() (*Config, error) {
 	v.SetDefault("cache.redis_addr", "localhost:6379")
 	v.SetDefault("cache.redis_db", 0)
 	v.SetDefault("cache.default_ttl", 1*time.Hour)
+	v.SetDefault("database.max_open_conns", 25)
+	v.SetDefault("database.max_idle_conns", 25)
+	v.SetDefault("database.conn_max_lifetime", 5*time.Minute)
+	v.SetDefault("database.conn_max_idle_time", 5*time.Minute)
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -72,6 +90,19 @@ func Load() (*Config, error) {
 	v.BindEnv("cache.redis_db", "REDIS_DB")
 	v.BindEnv("event_bus.nats_url", "NATS_URL")
 	v.BindEnv("recheck.base_url", "RECHECK_BASE_URL")
+	v.SetDefault("ref_cache.refresh_ttl", 5*time.Minute)
+
+	v.BindEnv("ref_cache.enable_operators", "CACHE_OPERATORS")
+	v.BindEnv("ref_cache.enable_stations", "CACHE_STATIONS")
+	v.BindEnv("ref_cache.enable_classes", "CACHE_CLASSES")
+	v.BindEnv("ref_cache.enable_reasons", "CACHE_REASONS")
+	v.BindEnv("ref_cache.enable_integration", "CACHE_INTEGRATION")
+	v.BindEnv("ref_cache.refresh_ttl", "CACHE_REFRESH_TTL")
+
+	v.BindEnv("database.max_open_conns", "DB_MAX_OPEN_CONNS")
+	v.BindEnv("database.max_idle_conns", "DB_MAX_IDLE_CONNS")
+	v.BindEnv("database.conn_max_lifetime", "DB_CONN_MAX_LIFETIME")
+	v.BindEnv("database.conn_max_idle_time", "DB_CONN_MAX_IDLE_TIME")
 
 	// Regional trip pool DSNs
 	for _, region := range []string{"th", "in", "eu", "asia1", "asia2"} {

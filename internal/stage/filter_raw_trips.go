@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 )
 
 // CompositeRow stores godate, departure2_time, and the price from a single composite
@@ -34,12 +35,16 @@ func NewFilterRawTripsStage() *FilterRawTripsStage { return &FilterRawTripsStage
 
 func (s *FilterRawTripsStage) Name() string { return "filter_raw_trips" }
 
-func (s *FilterRawTripsStage) Execute(_ context.Context, in RawTripsResult) (FilteredTrips, error) {
+func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (FilteredTrips, error) {
 	out := FilteredTrips{Filter: in.Filter}
 
 	if len(in.Trips) == 0 {
 		return out, nil
 	}
+
+	pc := pipeline.FromContext(ctx)
+	const stage = "filter_raw_trips"
+	t := pc.StartTimer(stage, "station_collect")
 
 	// Collect station IDs from ALL raw trips before filtering.
 	// PHP collects stations in prepareRawTrips which runs before trip-level
@@ -87,6 +92,9 @@ func (s *FilterRawTripsStage) Execute(_ context.Context, in RawTripsResult) (Fil
 			})
 		}
 	}
+
+	t.Stop()
+	t = pc.StartTimer(stage, "filter_loop")
 
 	// Track operator+station pairs for daytrip detection
 	type stationPair struct {
@@ -150,6 +158,8 @@ func (s *FilterRawTripsStage) Execute(_ context.Context, in RawTripsResult) (Fil
 
 		direct = append(direct, *trip)
 	}
+
+	t.Stop()
 
 	out.DirectTrips = direct
 	out.ConnectionCompositeRows = connectionCompositeRows

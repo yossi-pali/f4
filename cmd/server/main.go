@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"github.com/12go/f4/internal/db"
 	"github.com/12go/f4/internal/event"
 	"github.com/12go/f4/internal/feature"
+	"github.com/12go/f4/internal/refcache"
 	"github.com/12go/f4/internal/repository"
 	"github.com/12go/f4/internal/stage"
 )
@@ -97,7 +99,30 @@ func main() {
 	reasonRepo := repository.NewReasonRepo(defaultDB)
 	integrationRepo := repository.NewIntegrationRepo(defaultDB)
 	tranRepo := repository.NewTranRepo(defaultDB)
-	stage6 := stage.NewCollectRefDataStage(stationRepo, operatorRepo, classRepo, imageRepo, reasonRepo, integrationRepo, tranRepo)
+
+	// Reference data cache (each entity toggled by env var, all off by default)
+	refCacheCfg := refcache.CacheConfig{
+		EnableOperators:   cfg.RefCache.EnableOperators,
+		EnableStations:    cfg.RefCache.EnableStations,
+		EnableClasses:     cfg.RefCache.EnableClasses,
+		EnableReasons:     cfg.RefCache.EnableReasons,
+		EnableIntegration: cfg.RefCache.EnableIntegration,
+		RefreshTTL:        cfg.RefCache.RefreshTTL,
+	}
+	var rCache *refcache.RefDataCache
+	if refCacheCfg.EnableOperators || refCacheCfg.EnableStations || refCacheCfg.EnableClasses || refCacheCfg.EnableIntegration {
+		rCache = refcache.New(refCacheCfg, defaultDB, logger)
+		rCache.Start(context.Background())
+		defer rCache.Stop()
+		logger.Info("reference data cache enabled",
+			zap.Bool("operators", refCacheCfg.EnableOperators),
+			zap.Bool("stations", refCacheCfg.EnableStations),
+			zap.Bool("classes", refCacheCfg.EnableClasses),
+			zap.Bool("integration", refCacheCfg.EnableIntegration),
+		)
+	}
+
+	stage6 := stage.NewCollectRefDataStage(stationRepo, operatorRepo, classRepo, imageRepo, reasonRepo, integrationRepo, tranRepo, rCache)
 	stage7 := stage.NewHydrateResultsStage()
 	stage8 := stage.NewSortAndFinalizeStage(stationRepo)
 	stage9 := stage.NewSerializeResponseStage(publisher, cfg.Recheck.BaseURL)
@@ -129,6 +154,14 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
+	}()
+
+	// pprof debug server on separate port
+	go func() {
+		logger.Info("starting pprof server", zap.Int("port", 6060))
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			logger.Warn("pprof server error", zap.Error(err))
+		}
 	}()
 
 	logger.Info("starting server", zap.Int("port", cfg.Server.Port))

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 )
 
 // HydratedResults is the output of Stage 7.
@@ -31,7 +32,7 @@ func NewHydrateResultsStage() *HydrateResultsStage { return &HydrateResultsStage
 
 func (s *HydrateResultsStage) Name() string { return "hydrate_results" }
 
-func (s *HydrateResultsStage) Execute(_ context.Context, in EnrichedTrips) (HydratedResults, error) {
+func (s *HydrateResultsStage) Execute(ctx context.Context, in EnrichedTrips) (HydratedResults, error) {
 	out := HydratedResults{
 		Operators:               in.Operators,
 		Stations:                in.Stations,
@@ -42,11 +43,14 @@ func (s *HydrateResultsStage) Execute(_ context.Context, in EnrichedTrips) (Hydr
 		Filter:                  in.Filter,
 	}
 
+	pc := pipeline.FromContext(ctx)
+	t := pc.StartTimer("hydrate_results", "hydrate_loop")
 	results := make([]domain.TripResult, 0, len(in.Trips))
 	for _, raw := range in.Trips {
 		tr := s.hydrateTrip(raw, in)
 		results = append(results, tr)
 	}
+	t.Stop()
 	out.Trips = results
 
 	return out, nil

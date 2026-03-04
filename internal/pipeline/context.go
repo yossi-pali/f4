@@ -32,6 +32,44 @@ func (pc *PipelineContext) RecordStageTime(stage string, d time.Duration) {
 	pc.mu.Unlock()
 }
 
+// RecordSubStageTime records the duration of a sub-operation within a stage.
+// Uses dotted key format: "stage_name.operation".
+func (pc *PipelineContext) RecordSubStageTime(stage, operation string, d time.Duration) {
+	key := stage + "." + operation
+	pc.mu.Lock()
+	pc.stageTimes[key] = d
+	pc.mu.Unlock()
+}
+
+// Timer is a convenience helper for recording sub-stage durations.
+type Timer struct {
+	pc        *PipelineContext
+	stage     string
+	operation string
+	start     time.Time
+}
+
+// StartTimer begins timing a sub-stage operation.
+// Safe to call on nil receiver — returns a no-op timer.
+func (pc *PipelineContext) StartTimer(stage, operation string) *Timer {
+	return &Timer{
+		pc:        pc,
+		stage:     stage,
+		operation: operation,
+		start:     time.Now(),
+	}
+}
+
+// Stop records the elapsed time and returns the duration.
+// Safe to call when the Timer's PipelineContext is nil (no-op).
+func (t *Timer) Stop() time.Duration {
+	d := time.Since(t.start)
+	if t.pc != nil {
+		t.pc.RecordSubStageTime(t.stage, t.operation, d)
+	}
+	return d
+}
+
 // StageTimes returns a copy of recorded stage durations.
 func (pc *PipelineContext) StageTimes() map[string]time.Duration {
 	pc.mu.Lock()

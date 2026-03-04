@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 )
 
 // RecheckGroup represents one integration chunk that needs price rechecking.
@@ -70,16 +71,22 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		Filter:    in.Filter,
 	}
 
+	pc := pipeline.FromContext(ctx)
+	const stage = "sort_and_finalize"
+
 	// Get to province name for response
+	t := pc.StartTimer(stage, "province_lookup")
 	if in.Filter.ToPlaceID != domain.UnknownPlace {
 		out.ToProvinceName = s.stationRepo.GetParentProvinceName(ctx, in.Filter.ToPlaceID)
 	}
+	t.Stop()
 
 	if len(in.Trips) == 0 {
 		out.Trips = []domain.TripResult{}
 		return out, nil
 	}
 
+	t = pc.StartTimer(stage, "merge_loop")
 	// Merge duplicate travel options by group key.
 	// PHP TripResultApiV1Factory: when an existing trip is NOT bookable and a new
 	// travel option IS bookable, the trip-level data (segments, params, transfer_id)
@@ -295,7 +302,10 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		trips = append(trips, *trip)
 	}
 
+	t.Stop()
+
 	// Sort: bookable first → valid price → special deals → rank score
+	t = pc.StartTimer(stage, "sort")
 	sort.SliceStable(trips, func(i, j int) bool {
 		a, b := trips[i], trips[j]
 		if a.IsBookable != b.IsBookable {
@@ -310,6 +320,9 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		return a.RankScore > b.RankScore
 	})
 
+	t.Stop()
+
+	t = pc.StartTimer(stage, "recheck_groups")
 	out.Trips = trips
 	for key := range recheckKeySet {
 		out.RecheckTripKeys = append(out.RecheckTripKeys, key)
@@ -364,6 +377,7 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	for code := range integrationSet {
 		out.PresentIntegrations = append(out.PresentIntegrations, code)
 	}
+	t.Stop()
 
 	return out, nil
 }

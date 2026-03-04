@@ -1,4 +1,4 @@
-.PHONY: build run test test-v test-fresh vet lint clean docker compare compare-clean kill-port
+.PHONY: build run test test-v test-fresh vet lint clean docker docker-run compare compare-golive compare-rediff compare-clean compare-go baseline-build baseline-up baseline-down kill-port
 
 APP_NAME := f4
 BUILD_DIR := ./cmd/server
@@ -44,6 +44,18 @@ compare-rediff:
 
 compare-clean:
 	go run ./cmd/comparator clean
+
+baseline-build: ## Build and tag current Go app as baseline
+	docker build -t f4-baseline:latest .
+
+baseline-up: ## Start baseline Go app on port 8081
+	docker compose -f docker-compose.baseline.yml up -d
+
+baseline-down: ## Stop baseline
+	docker compose -f docker-compose.baseline.yml down
+
+compare-go: ## Compare baseline Go vs dev Go
+	go run ./cmd/comparator gocheck
 
 kill-port:
 	go run scripts/killport.go

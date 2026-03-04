@@ -62,7 +62,7 @@ func LoadConfig(path string) (*Config, error) {
 
 func (c *Config) validate() error {
 	if len(c.Endpoints) < 2 {
-		return fmt.Errorf("config must define at least 2 endpoints (legacy and new)")
+		return fmt.Errorf("config must define at least 2 endpoints")
 	}
 	if _, ok := c.Endpoints["legacy"]; !ok {
 		return fmt.Errorf("config missing 'legacy' endpoint")

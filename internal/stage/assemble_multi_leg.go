@@ -3,9 +3,13 @@ package stage
 import (
 	"context"
 	"fmt"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/12go/f4/internal/db"
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -51,10 +55,14 @@ func (s *AssembleMultiLegStage) Name() string { return "assemble_multi_leg" }
 
 func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLegInput) (MultiLegTrips, error) {
 	var out MultiLegTrips
+	pc := pipeline.FromContext(ctx)
+	const stage = "assemble_multi_leg"
 
 	// Build connections from trip_pool4_set
 	if len(in.ConnectionIDs) > 0 {
-		conns, pendingPacks, err := s.buildConnections(ctx, in)
+		t := pc.StartTimer(stage, "find_sets")
+		conns, pendingPacks, err := s.buildConnections(ctx, in, pc)
+		t.Stop()
 		if err != nil {
 			return out, err
 		}
@@ -64,7 +72,9 @@ func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLeg
 
 	// Build autopacks
 	if in.Filter.WithAutopacks && in.Filter.FromPlaceID != domain.UnknownPlace && in.Filter.ToPlaceID != domain.UnknownPlace {
+		t := pc.StartTimer(stage, "autopacks")
 		packs, err := s.buildAutopacks(ctx, in)
+		t.Stop()
 		if err != nil {
 			return out, err
 		}
@@ -74,7 +84,8 @@ func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLeg
 	return out, nil
 }
 
-func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in AssembleMultiLegInput) ([]domain.RawTrip, []domain.PendingPackRecheck, error) {
+func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in AssembleMultiLegInput, pc *pipeline.PipelineContext) ([]domain.RawTrip, []domain.PendingPackRecheck, error) {
+	const stage = "assemble_multi_leg"
 	// Determine region from first departure station
 	region := db.DefaultRegion
 	if len(in.Filter.FromStationIDs) > 0 {
@@ -132,6 +143,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 		for k := range missingKeys {
 			keys = append(keys, k)
 		}
+		tm := pc.StartTimer(stage, "fetch_missing_keys")
 		fetched, err := s.tripPoolRepo.FindByTripKeys(ctx, region, keys, in.SearchParams)
 		if err == nil {
 			for _, t := range fetched {
@@ -141,28 +153,42 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 			}
 		}
 		// Non-fatal: if fetch fails, continue with what we have
+		tm.Stop()
 	}
 
 	// Fetch multi-day legs with adjusted godate.
 	// PHP PackAndConnectionSearch adjusts godate by trip2_day/trip3_day.
-	for dayOffset, keySet := range multiDayKeys {
-		keys := make([]string, 0, len(keySet))
-		for k := range keySet {
-			keys = append(keys, k)
-		}
-		adjustedDate := in.Filter.Date.AddDate(0, 0, dayOffset)
-		adjustedParams := in.SearchParams
-		adjustedParams.GodateString = adjustedDate.Format("2006-01-02")
-		fetched, err := s.tripPoolRepo.FindByTripKeys(ctx, region, keys, adjustedParams)
-		if err == nil {
-			for _, t := range fetched {
-				if _, exists := tripByKey[t.TripKey]; !exists {
-					tripByKey[t.TripKey] = t
-				}
+	tm2 := pc.StartTimer(stage, "fetch_multiday")
+	if len(multiDayKeys) > 0 {
+		var mu sync.Mutex
+		mdg, mdctx := errgroup.WithContext(ctx)
+		for dayOffset, keySet := range multiDayKeys {
+			keys := make([]string, 0, len(keySet))
+			for k := range keySet {
+				keys = append(keys, k)
 			}
+			adjustedDate := in.Filter.Date.AddDate(0, 0, dayOffset)
+			adjustedParams := in.SearchParams
+			adjustedParams.GodateString = adjustedDate.Format("2006-01-02")
+			mdg.Go(func() error {
+				fetched, err := s.tripPoolRepo.FindByTripKeys(mdctx, region, keys, adjustedParams)
+				if err == nil {
+					mu.Lock()
+					for _, t := range fetched {
+						if _, exists := tripByKey[t.TripKey]; !exists {
+							tripByKey[t.TripKey] = t
+						}
+					}
+					mu.Unlock()
+				}
+				return nil // non-fatal
+			})
 		}
+		mdg.Wait()
 	}
+	tm2.Stop()
 
+	tm3 := pc.StartTimer(stage, "assembly")
 	searchDate := in.Filter.Date.Format("2006-01-02")
 
 	var connections []domain.RawTrip
@@ -289,6 +315,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 		connections = append(connections, conn)
 	}
 
+	tm3.Stop()
 	return connections, pendingPacks, nil
 }
 

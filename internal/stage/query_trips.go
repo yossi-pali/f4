@@ -2,9 +2,9 @@ package stage
 
 import (
 	"context"
-	"time"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -34,7 +34,10 @@ func (s *QueryTripsStage) Execute(ctx context.Context, filter domain.SearchFilte
 		return result, nil
 	}
 
-	start := time.Now()
+	pc := pipeline.FromContext(ctx)
+	const stage = "query_trips"
+
+	t := pc.StartTimer(stage, "sql_execute")
 
 	params := repository.SearchParams{
 		FromStationIDs:     filter.FromStationIDs,
@@ -66,12 +69,13 @@ func (s *QueryTripsStage) Execute(ctx context.Context, filter domain.SearchFilte
 	}
 
 	trips, err := s.tripPoolRepo.Search(ctx, params)
+	sqlDur := t.Stop()
 	if err != nil {
 		return result, err
 	}
 
 	result.Trips = trips
-	result.QueryTimeMs = time.Since(start).Milliseconds()
+	result.QueryTimeMs = sqlDur.Milliseconds()
 
 	return result, nil
 }

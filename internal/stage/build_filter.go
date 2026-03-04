@@ -7,6 +7,7 @@ import (
 
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/feature"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -97,6 +98,9 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 	}
 
 	// Apply security restrictions
+	pc := pipeline.FromContext(ctx)
+	const stage = "build_filter"
+	t := pc.StartTimer(stage, "data_sec")
 	sec, err := s.dataSecRepo.GetRestrictions(ctx, in.Agent.AgentID)
 	if err != nil {
 		return filter, err
@@ -112,7 +116,10 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 	filter.ExcludeVehclassIDs = sec.ExcludeVehclassIDs
 	filter.ExcludeClassIDs = sec.ExcludeClassIDs
 
+	t.Stop()
+
 	// Apply white-label restrictions
+	t = pc.StartTimer(stage, "white_label")
 	wlCfg, err := s.whiteLabelRepo.GetConfig(ctx, in.Agent.AgentID)
 	if err != nil {
 		return filter, err
@@ -123,6 +130,8 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 			filter.IsNotPossible = true
 		}
 	}
+
+	t.Stop()
 
 	// Vehclass filter from query param
 	if p.VehclassID != "" {

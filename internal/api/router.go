@@ -28,8 +28,8 @@ func NewRouter(logger *zap.Logger, pipeline *stage.SearchPipeline, pageOverrides
 	r.Use(middleware.AgentExtraction)
 
 	// Handlers
-	searchHandler := handler.NewSearchHandler(pipeline)
-	searchByStationsHandler := handler.NewSearchByStationsHandler(pipeline)
+	searchHandler := handler.NewSearchHandler(pipeline, logger)
+	searchByStationsHandler := handler.NewSearchByStationsHandler(pipeline, logger)
 	healthHandler := handler.NewHealthHandler()
 	adminHandler := handler.NewAdminSearchHandler(pageOverrides)
 

@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -54,8 +55,13 @@ func (s *ResolvePlacesStage) Execute(ctx context.Context, in ResolvePlacesInput)
 		return out, nil
 	}
 
+	pc := pipeline.FromContext(ctx)
+	const stage = "resolve_places"
+
 	// Resolve from place
+	t := pc.StartTimer(stage, "from_resolve")
 	fromIDs, err := s.stationRepo.ResolvePlaceToStationIDs(ctx, in.FromPlaceID)
+	t.Stop()
 	if err != nil {
 		return out, err
 	}
@@ -66,7 +72,9 @@ func (s *ResolvePlacesStage) Execute(ctx context.Context, in ResolvePlacesInput)
 	out.FromStationIDs = fromIDs
 
 	// Resolve to place
+	t = pc.StartTimer(stage, "to_resolve")
 	toIDs, err := s.stationRepo.ResolvePlaceToStationIDs(ctx, in.ToPlaceID)
+	t.Stop()
 	if err != nil {
 		return out, err
 	}

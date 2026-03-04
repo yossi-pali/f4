@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"github.com/12go/f4/internal/api/middleware"
 	"github.com/12go/f4/internal/api/response"
@@ -17,13 +18,15 @@ import (
 // SearchByStationsHandler handles GET /searchByStations/{fromStations}/{toStations}/{date}
 type SearchByStationsHandler struct {
 	pipeline *stage.SearchPipeline
+	logger   *zap.Logger
 }
 
-func NewSearchByStationsHandler(pipeline *stage.SearchPipeline) *SearchByStationsHandler {
-	return &SearchByStationsHandler{pipeline: pipeline}
+func NewSearchByStationsHandler(pipeline *stage.SearchPipeline, logger *zap.Logger) *SearchByStationsHandler {
+	return &SearchByStationsHandler{pipeline: pipeline, logger: logger}
 }
 
 func (h *SearchByStationsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	fromStr := chi.URLParam(r, "fromStations")
 	toStr := chi.URLParam(r, "toStations")
 	dateStr := chi.URLParam(r, "date")
@@ -57,9 +60,22 @@ func (h *SearchByStationsHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		Agent:        agent,
 	})
 	if err != nil {
+		h.logger.Error("pipeline error", zap.Error(err))
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+
+	elapsed := time.Since(start)
+	writeStageTimingHeaders(w, result.StageTimes, elapsed)
+
+	h.logger.Info("search_by_stations",
+		zap.String("from", fromStr),
+		zap.String("to", toStr),
+		zap.String("date", dateStr),
+		zap.Int("trips", len(result.Trips)),
+		zap.Duration("total", elapsed),
+		zap.Any("stages", result.StageTimes),
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	v1 := response.FromDomain(result.Trips, result.Recheck, result.Stations, result.Operators, result.Classes, result.ProvinceName)

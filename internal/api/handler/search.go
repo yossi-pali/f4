@@ -2,12 +2,14 @@ package handler
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"github.com/12go/f4/internal/api/middleware"
 	"github.com/12go/f4/internal/api/response"
@@ -18,13 +20,15 @@ import (
 // SearchHandler handles GET /search/{fromPlaceID}/{toPlaceID}/{date}
 type SearchHandler struct {
 	pipeline *stage.SearchPipeline
+	logger   *zap.Logger
 }
 
-func NewSearchHandler(pipeline *stage.SearchPipeline) *SearchHandler {
-	return &SearchHandler{pipeline: pipeline}
+func NewSearchHandler(pipeline *stage.SearchPipeline, logger *zap.Logger) *SearchHandler {
+	return &SearchHandler{pipeline: pipeline, logger: logger}
 }
 
 func (h *SearchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	fromPlaceID := chi.URLParam(r, "fromPlaceID")
 	toPlaceID := chi.URLParam(r, "toPlaceID")
 	dateStr := chi.URLParam(r, "date")
@@ -46,14 +50,39 @@ func (h *SearchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Agent:       agent,
 	})
 	if err != nil {
-		log.Printf("pipeline error: %v", err)
+		h.logger.Error("pipeline error", zap.Error(err))
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
+	elapsed := time.Since(start)
+	writeStageTimingHeaders(w, result.StageTimes, elapsed)
+
+	h.logger.Info("search",
+		zap.String("from", fromPlaceID),
+		zap.String("to", toPlaceID),
+		zap.String("date", dateStr),
+		zap.Int("trips", len(result.Trips)),
+		zap.Duration("total", elapsed),
+		zap.Any("stages", result.StageTimes),
+	)
+
 	w.Header().Set("Content-Type", "application/json")
 	v1 := response.FromDomain(result.Trips, result.Recheck, result.Stations, result.Operators, result.Classes, result.ProvinceName)
 	json.NewEncoder(w).Encode(v1)
+}
+
+// writeStageTimingHeaders sets X-Stage-* and X-Total-Time headers.
+func writeStageTimingHeaders(w http.ResponseWriter, stages map[string]time.Duration, total time.Duration) {
+	keys := make([]string, 0, len(stages))
+	for k := range stages {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		w.Header().Set(fmt.Sprintf("X-Stage-%s", k), fmt.Sprintf("%dms", stages[k].Milliseconds()))
+	}
+	w.Header().Set("X-Total-Time", fmt.Sprintf("%dms", total.Milliseconds()))
 }
 
 func parseSearchParams(r *http.Request) domain.SearchParams {

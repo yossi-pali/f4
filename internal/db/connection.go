@@ -10,6 +10,14 @@ import (
 	"github.com/12go/f4/internal/config"
 )
 
+// PoolConfig holds connection pool tuning parameters.
+type PoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
 // ConnectionManager manages multiple MySQL connections with regional sharding.
 type ConnectionManager struct {
 	defaultDB *sqlx.DB
@@ -18,12 +26,32 @@ type ConnectionManager struct {
 
 // NewConnectionManager creates connections from config.
 func NewConnectionManager(cfg config.DatabaseConfig) (*ConnectionManager, error) {
+	pool := PoolConfig{
+		MaxOpenConns:    cfg.MaxOpenConns,
+		MaxIdleConns:    cfg.MaxIdleConns,
+		ConnMaxLifetime: cfg.ConnMaxLifetime,
+		ConnMaxIdleTime: cfg.ConnMaxIdleTime,
+	}
+	// Apply defaults if not set
+	if pool.MaxOpenConns == 0 {
+		pool.MaxOpenConns = 25
+	}
+	if pool.MaxIdleConns == 0 {
+		pool.MaxIdleConns = 25
+	}
+	if pool.ConnMaxLifetime == 0 {
+		pool.ConnMaxLifetime = 5 * time.Minute
+	}
+	if pool.ConnMaxIdleTime == 0 {
+		pool.ConnMaxIdleTime = 5 * time.Minute
+	}
+
 	cm := &ConnectionManager{
 		tripPools: make(map[string]*sqlx.DB),
 	}
 
 	if cfg.Default != "" {
-		db, err := openDB(cfg.Default)
+		db, err := openDB(cfg.Default, pool)
 		if err != nil {
 			return nil, fmt.Errorf("default DB: %w", err)
 		}
@@ -34,7 +62,7 @@ func NewConnectionManager(cfg config.DatabaseConfig) (*ConnectionManager, error)
 		if dsn == "" {
 			continue
 		}
-		db, err := openDB(dsn)
+		db, err := openDB(dsn, pool)
 		if err != nil {
 			return nil, fmt.Errorf("trip_pool region %s: %w", region, err)
 		}
@@ -44,15 +72,15 @@ func NewConnectionManager(cfg config.DatabaseConfig) (*ConnectionManager, error)
 	return cm, nil
 }
 
-func openDB(dsn string) (*sqlx.DB, error) {
+func openDB(dsn string, pool PoolConfig) (*sqlx.DB, error) {
 	db, err := sqlx.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	db.SetConnMaxIdleTime(1 * time.Minute)
+	db.SetMaxOpenConns(pool.MaxOpenConns)
+	db.SetMaxIdleConns(pool.MaxIdleConns)
+	db.SetConnMaxLifetime(pool.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(pool.ConnMaxIdleTime)
 
 	if err := db.Ping(); err != nil {
 		db.Close()

@@ -25,6 +25,8 @@ func main() {
 		cmdRediff(os.Args[2:])
 	case "golive":
 		cmdGoLive(os.Args[2:])
+	case "gocheck":
+		cmdGoCheck(os.Args[2:])
 	case "clean":
 		cmdClean(os.Args[2:])
 	default:
@@ -40,6 +42,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  run     Run comparison tests (both endpoints live)")
 	fmt.Fprintln(os.Stderr, "  golive  Cached legacy + live Go fetch, then diff")
+	fmt.Fprintln(os.Stderr, "  gocheck Compare baseline Go (8081) vs dev Go (8080)")
 	fmt.Fprintln(os.Stderr, "  rediff  Re-diff raw responses from a previous run")
 	fmt.Fprintln(os.Stderr, "  clean   Clean old test results")
 	fmt.Fprintln(os.Stderr, "")
@@ -375,6 +378,92 @@ func cmdGoLive(args []string) {
 	comparator.PrintReport(summary, runDir)
 }
 
+
+func cmdGoCheck(args []string) {
+	fs := flag.NewFlagSet("gocheck", flag.ExitOnError)
+	configPath := fs.String("config", "cmd/comparator/config.yaml", "path to config file")
+	fs.Parse(args)
+
+	cfg, err := comparator.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	if _, ok := cfg.Endpoints["baseline"]; !ok {
+		fmt.Fprintln(os.Stderr, "Config missing 'baseline' endpoint (needed for gocheck)")
+		os.Exit(1)
+	}
+
+	cases := cfg.TestCases()
+	if len(cases) == 0 {
+		fmt.Fprintln(os.Stderr, "No test cases to run (check scenarios and dates in config)")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Comparing baseline Go vs dev Go: %d test cases (%d scenarios x %d dates)...\n\n",
+		len(cases), len(cfg.Scenarios), len(cfg.Dates))
+
+	runner := comparator.NewRunner(cfg)
+	now := time.Now()
+	storage := comparator.NewStorage(cfg.OutputDir)
+	runDir := storage.RunDir(now)
+	differ := comparator.NewDiffer(cfg.FloatTolerance)
+
+	var diffs []*comparator.DiffResult
+	for i, tc := range cases {
+		fmt.Printf("[%d/%d] %s @ %s ...\n", i+1, len(cases), tc.Scenario.Name, tc.Date)
+
+		baselineResult := runner.FetchEndpoint(tc, "baseline")
+		devResult := runner.FetchEndpoint(tc, "new")
+
+		if baselineResult.Err == nil {
+			if err := storage.SaveRaw(runDir, tc, "baseline", baselineResult.Body); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save baseline raw: %v\n", err)
+			}
+		}
+		if devResult.Err == nil {
+			if err := storage.SaveRaw(runDir, tc, "dev", devResult.Body); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save dev raw: %v\n", err)
+			}
+		}
+
+		var diff *comparator.DiffResult
+		if baselineResult.Err != nil || devResult.Err != nil {
+			diff = &comparator.DiffResult{
+				Scenario:     tc.Scenario.Name,
+				Date:         tc.Date,
+				LegacyStatus: baselineResult.StatusCode,
+				NewStatus:    devResult.StatusCode,
+			}
+			if baselineResult.Err != nil {
+				diff.Errors = append(diff.Errors, fmt.Sprintf("baseline: %v", baselineResult.Err))
+			}
+			if devResult.Err != nil {
+				diff.Errors = append(diff.Errors, fmt.Sprintf("dev: %v", devResult.Err))
+			}
+		} else {
+			diff = differ.Compare(tc, baselineResult.Body, devResult.Body, baselineResult.StatusCode, devResult.StatusCode)
+		}
+
+		if err := storage.SaveDiff(runDir, tc, diff); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save diff: %v\n", err)
+		}
+		diffs = append(diffs, diff)
+
+		fmt.Printf("  timing: baseline=%s  dev=%s\n",
+			baselineResult.Duration.Round(time.Millisecond),
+			devResult.Duration.Round(time.Millisecond))
+	}
+
+	timestamp := now.Format("2006-01-02T15:04:05")
+	summary := comparator.BuildSummary(timestamp, cfg.FloatTolerance, diffs)
+	if err := storage.SaveSummary(runDir, summary); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save summary: %v\n", err)
+	}
+
+	comparator.PrintReport(summary, runDir)
+}
 
 func cmdClean(args []string) {
 	fs := flag.NewFlagSet("clean", flag.ExitOnError)

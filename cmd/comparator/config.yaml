@@ -13,6 +13,12 @@ endpoints:
       Host: "recheck10.12go.asia"
     params:
       a: "1"
+  baseline:
+    base_url: "http://localhost:8081"
+    headers:
+      Host: "recheck10.12go.asia"
+    params:
+      a: "1"
 
 # Dates to test — each scenario runs once per date
 dates:

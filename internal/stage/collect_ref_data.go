@@ -3,9 +3,13 @@ package stage
 import (
 	"context"
 
+	"time"
+
 	"golang.org/x/sync/errgroup"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
+	"github.com/12go/f4/internal/refcache"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -41,6 +45,7 @@ type CollectRefDataStage struct {
 	reasonRepo      *repository.ReasonRepo
 	integrationRepo *repository.IntegrationRepo
 	tranRepo        *repository.TranRepo
+	refCache        *refcache.RefDataCache
 }
 
 func NewCollectRefDataStage(
@@ -51,8 +56,9 @@ func NewCollectRefDataStage(
 	reasonRepo *repository.ReasonRepo,
 	integrationRepo *repository.IntegrationRepo,
 	tranRepo *repository.TranRepo,
+	refCache ...*refcache.RefDataCache,
 ) *CollectRefDataStage {
-	return &CollectRefDataStage{
+	s := &CollectRefDataStage{
 		stationRepo:     stationRepo,
 		operatorRepo:    operatorRepo,
 		classRepo:       classRepo,
@@ -61,6 +67,10 @@ func NewCollectRefDataStage(
 		integrationRepo: integrationRepo,
 		tranRepo:        tranRepo,
 	}
+	if len(refCache) > 0 {
+		s.refCache = refCache[0]
+	}
+	return s
 }
 
 func (s *CollectRefDataStage) Name() string { return "collect_ref_data" }
@@ -129,6 +139,8 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	}
 
 	// Load all reference data in parallel
+	pc := pipeline.FromContext(ctx)
+	const stage = "collect_ref_data"
 	origCtx := ctx
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -137,39 +149,79 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	var classTranslations map[string]string
 	var weightOverrides map[int]int
 
-	g.Go(func() error {
+	timedGo := func(g *errgroup.Group, opName string, fn func() error) {
+		g.Go(func() error {
+			start := time.Now()
+			err := fn()
+			if pc != nil {
+				pc.RecordSubStageTime(stage, opName, time.Since(start))
+			}
+			return err
+		})
+	}
+
+	timedGo(g, "operators", func() error {
+		if s.refCache != nil {
+			if cached, ok := s.refCache.GetOperators(operatorIDs); ok {
+				out.Operators = cached
+				return nil
+			}
+		}
 		var err error
 		out.Operators, err = s.operatorRepo.FindByIDs(ctx, operatorIDs)
 		return err
 	})
 
-	g.Go(func() error {
+	timedGo(g, "ratings", func() error {
+		if s.refCache != nil {
+			if cached, ok := s.refCache.GetOperatorRatings(operatorIDs); ok {
+				ratings = cached
+				return nil
+			}
+		}
 		var err error
 		ratings, err = s.operatorRepo.FindOperatorRatings(ctx, operatorIDs)
 		return err
 	})
 
-	g.Go(func() error {
+	timedGo(g, "stations", func() error {
+		if s.refCache != nil {
+			if cached, ok := s.refCache.GetStations(stationIDs); ok {
+				out.Stations = cached
+				return nil
+			}
+		}
 		var err error
 		out.Stations, err = s.stationRepo.FindStationsByIDs(ctx, stationIDs)
 		return err
 	})
 
-	g.Go(func() error {
+	timedGo(g, "classes", func() error {
+		if s.refCache != nil {
+			if cached, ok := s.refCache.GetClasses(classIDs); ok {
+				out.Classes = cached
+				return nil
+			}
+		}
 		var err error
 		out.Classes, err = s.classRepo.FindByIDs(ctx, classIDs)
 		return err
 	})
 
-	g.Go(func() error {
+	timedGo(g, "reasons", func() error {
 		reasonIDs := setToSlice(reasonIDSet)
 		var err error
 		out.ReasonTexts, err = s.reasonRepo.FindReasonTexts(ctx, reasonIDs, in.Filter.Lang)
 		return err
 	})
 
-	// Manual integration lookup (for chunk_key computation)
-	g.Go(func() error {
+	timedGo(g, "integration", func() error {
+		if s.refCache != nil {
+			if id, ok := s.refCache.GetManualIntegrationID(); ok {
+				out.ManualIntegrationID = id
+				return nil
+			}
+		}
 		manual, err := s.integrationRepo.FindByCode(ctx, "manual")
 		if err == nil {
 			out.ManualIntegrationID = manual.IntegrationID
@@ -177,29 +229,25 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 		return nil // non-fatal: fallback to 0
 	})
 
-	// Image loading
-	g.Go(func() error {
+	timedGo(g, "logos", func() error {
 		var err error
 		logos, err = s.imageRepo.FindOperatorLogos(ctx, operatorIDs)
 		return err
 	})
 
-	g.Go(func() error {
+	timedGo(g, "images", func() error {
 		var err error
 		out.Images, err = s.imageRepo.FindClassImages(ctx, pairs)
 		if err != nil {
 			return err
 		}
-		// Load custom class images into same collection
 		if err := s.imageRepo.LoadCustomClassImages(ctx, out.Images, pairs); err != nil {
 			return err
 		}
-		// Load route images into same collection
 		return s.imageRepo.LoadRouteImages(ctx, out.Images, routeIDs)
 	})
 
-	// Station weight overrides from page_override table
-	g.Go(func() error {
+	timedGo(g, "weight_overrides", func() error {
 		var err error
 		weightOverrides, err = s.stationRepo.FindStationWeightOverrides(ctx, stationIDs, in.Filter.PageURL)
 		if err != nil {
@@ -214,11 +262,13 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 
 	// Translate class names (matching PHP ClassCollector: $this->tran->translate($class['class_name']))
 	// Done after g.Wait because we need loaded class names first.
+	t := pc.StartTimer(stage, "translate")
 	classNames := make([]string, 0, len(out.Classes))
 	for _, c := range out.Classes {
 		classNames = append(classNames, c.Name)
 	}
 	classTranslations, _ = s.tranRepo.TranslateMany(origCtx, classNames, in.Filter.Lang)
+	t.Stop()
 	if len(classTranslations) > 0 {
 		for id, c := range out.Classes {
 			if translated, ok := classTranslations[c.Name]; ok {
