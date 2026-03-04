@@ -236,15 +236,22 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	})
 
 	timedGo(g, "images", func() error {
+		// FindClassImages creates the collection; must complete first.
 		var err error
 		out.Images, err = s.imageRepo.FindClassImages(ctx, pairs)
 		if err != nil {
 			return err
 		}
-		if err := s.imageRepo.LoadCustomClassImages(ctx, out.Images, pairs); err != nil {
-			return err
-		}
-		return s.imageRepo.LoadRouteImages(ctx, out.Images, routeIDs)
+		// Custom class images and route images write to separate fields —
+		// safe to run in parallel on the same ImageCollection.
+		ig, ictx := errgroup.WithContext(ctx)
+		ig.Go(func() error {
+			return s.imageRepo.LoadCustomClassImages(ictx, out.Images, pairs)
+		})
+		ig.Go(func() error {
+			return s.imageRepo.LoadRouteImages(ictx, out.Images, routeIDs)
+		})
+		return ig.Wait()
 	})
 
 	timedGo(g, "weight_overrides", func() error {

@@ -128,20 +128,31 @@
 - **Why:** Both lookups use only `agentID` — fully independent.
 - **Impact:** Minimal for default agent (data_sec ~0ms), but saves ~280ms for authenticated agents.
 
+## Phase 7: Parallel Image Queries in Stage 6
+
+**File:** `internal/stage/collect_ref_data.go`
+
+- **What:** Within the `images` goroutine, `LoadCustomClassImages` and `LoadRouteImages` now run in parallel via inner `errgroup`. `FindClassImages` still runs first (creates the ImageCollection).
+- **Pre-state:** 3 sequential image queries: FindClassImages → LoadCustomClassImages → LoadRouteImages (~900ms = 3 × 300ms).
+- **Post-state:** FindClassImages, then (LoadCustomClassImages ∥ LoadRouteImages) (~600ms = 2 round-trips).
+- **Why:** Custom and route images write to separate fields in ImageCollection — safe for parallel writes.
+- **Impact:** `images` goroutine dropped from **900ms → 600ms**, Stage 6 total from **1,238ms → 880ms**.
+
 ## Performance Comparison: Master vs Perf Branch
 
 **Comparison date:** 2026-03-04 | **15/15 PASS, 0 diffs**
 
 | Route | Master (baseline) | Perf (optimized) | Saved |
 |-------|------------------|-----------------|-------|
-| Bangkok→Chiang Mai | 6.2-6.7s | 5.2-5.4s | **~1.0s** |
-| Chiang Mai→Bangkok | 6.0-6.4s | 5.1-5.2s | **~1.0s** |
-| Surat Thani→Koh Phangan | 4.8-5.0s | 3.8-3.9s | **~1.0s** |
-| Surat Thani→Chiang Mai | 5.5-5.6s | 4.5s | **~1.0s** |
-| Bangkok→Phuket | 6.0-6.2s | 5.1-5.3s | **~1.0s** |
+| Bangkok→Chiang Mai | 5.6-7.0s | 4.3-4.5s | **~1.5s** |
+| Chiang Mai→Bangkok | 5.7-5.9s | 4.5s | **~1.3s** |
+| Surat Thani→Koh Phangan | 4.4-4.6s | 3.1-3.3s | **~1.3s** |
+| Surat Thani→Chiang Mai | 5.4-5.9s | 4.0-4.2s | **~1.4s** |
+| Bangkok→Phuket | 5.7-6.2s | 4.5-4.7s | **~1.3s** |
 
 **Remaining hotspots** (Bangkok→Chiang Mai, warm):
 - `assemble_multi_leg.find_sets`: 1,200ms — largest single query
-- `collect_ref_data.images`: 900ms — gates the parallel Stage 6 group
+- `collect_ref_data.images`: 600ms — 2 sequential round-trips (create + parallel load)
 - `query_trips.sql_execute`: 950ms — main trip pool query
 - `sort_and_finalize.province_lookup`: 280ms — single DB round-trip
+- `build_filter.white_label`: 290ms — single DB round-trip
