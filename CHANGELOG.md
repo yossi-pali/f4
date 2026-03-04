@@ -138,21 +138,29 @@
 - **Why:** Custom and route images write to separate fields in ImageCollection — safe for parallel writes.
 - **Impact:** `images` goroutine dropped from **900ms → 600ms**, Stage 6 total from **1,238ms → 880ms**.
 
+## Phase 8: Move Province Lookup to Stage 1
+
+**Files:** `internal/stage/resolve_places.go`, `internal/stage/build_filter.go`, `internal/stage/sort_and_finalize.go`, `internal/domain/filter.go`, `cmd/server/main.go`
+
+- **What:** Moved `GetParentProvinceName` from Stage 8 (sequential DB call) to Stage 1 (parallel errgroup). Province name stored in `SearchFilter.ToProvinceName` and flows through the pipeline. Removed `stationRepo` dependency from `SortAndFinalizeStage`.
+- **Pre-state:** Stage 8 called `GetParentProvinceName` as a blocking DB query (~280ms).
+- **Post-state:** Runs as a 5th parallel goroutine in Stage 1 (0ms additional cost — overlaps with 4 existing calls). Stage 8 reads from filter: **302ms → 4ms**.
+- **Why:** Free optimization — the DB call was already happening in Stage 1's time window.
+
 ## Performance Comparison: Master vs Perf Branch
 
 **Comparison date:** 2026-03-04 | **15/15 PASS, 0 diffs**
 
 | Route | Master (baseline) | Perf (optimized) | Saved |
 |-------|------------------|-----------------|-------|
-| Bangkok→Chiang Mai | 5.6-7.0s | 4.3-4.5s | **~1.5s** |
-| Chiang Mai→Bangkok | 5.7-5.9s | 4.5s | **~1.3s** |
-| Surat Thani→Koh Phangan | 4.4-4.6s | 3.1-3.3s | **~1.3s** |
-| Surat Thani→Chiang Mai | 5.4-5.9s | 4.0-4.2s | **~1.4s** |
-| Bangkok→Phuket | 5.7-6.2s | 4.5-4.7s | **~1.3s** |
+| Bangkok→Chiang Mai | 5.7-6.7s | 4.1-4.3s | **~1.7s** |
+| Chiang Mai→Bangkok | 5.7-6.2s | 4.2-4.4s | **~1.6s** |
+| Surat Thani→Koh Phangan | 4.5-4.6s | 3.0-3.1s | **~1.5s** |
+| Surat Thani→Chiang Mai | 5.4-5.5s | 3.8-4.0s | **~1.5s** |
+| Bangkok→Phuket | 5.9-6.0s | 4.4-4.6s | **~1.5s** |
 
 **Remaining hotspots** (Bangkok→Chiang Mai, warm):
 - `assemble_multi_leg.find_sets`: 1,200ms — largest single query
-- `collect_ref_data.images`: 600ms — 2 sequential round-trips (create + parallel load)
 - `query_trips.sql_execute`: 950ms — main trip pool query
-- `sort_and_finalize.province_lookup`: 280ms — single DB round-trip
+- `collect_ref_data.images`: 600ms — 2 sequential round-trips (create + parallel load)
 - `build_filter.white_label`: 290ms — single DB round-trip

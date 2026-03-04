@@ -67,6 +67,9 @@ type SearchFilter struct {
 	// Request context for recheck URL generation (matching PHP Rechecker)
 	SearchURL string // original request URL without query string
 	VisitorID string // unique visitor tracking ID
+
+	// Pre-resolved in Stage 1 to avoid DB round-trip in Stage 8
+	ToProvinceName string
 }
 
 // SearchParams holds the raw query parameters parsed from an HTTP request.

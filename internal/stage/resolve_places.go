@@ -21,14 +21,15 @@ type ResolvePlacesInput struct {
 
 // ResolvedPlaces is the output of Stage 1.
 type ResolvedPlaces struct {
-	FromPlaceID    string
-	ToPlaceID      string
-	FromStationIDs []int
-	ToStationIDs   []int
-	FromPlace      domain.Place
-	ToPlace        domain.Place
-	Distance       float64 // meters
-	IsNotPossible  bool
+	FromPlaceID      string
+	ToPlaceID        string
+	FromStationIDs   []int
+	ToStationIDs     []int
+	FromPlace        domain.Place
+	ToPlace          domain.Place
+	Distance         float64 // meters
+	IsNotPossible    bool
+	ToProvinceName   string // parent province name for "to" place (used in response)
 }
 
 // ResolvePlacesStage resolves place IDs to station IDs.
@@ -104,6 +105,13 @@ func (s *ResolvePlacesStage) Execute(ctx context.Context, in ResolvePlacesInput)
 			return err
 		}
 		out.ToPlace = place
+		return nil
+	})
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "to_province")
+		out.ToProvinceName = s.stationRepo.GetParentProvinceName(gctx, in.ToPlaceID)
+		t.Stop()
 		return nil
 	})
 

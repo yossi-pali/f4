@@ -64,6 +64,7 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 		ToStationIDs:   rp.ToStationIDs,
 		Date:           in.Date,
 		IsNotPossible:  rp.IsNotPossible,
+		ToProvinceName: rp.ToProvinceName,
 
 		// Defaults
 		SeatsAdult:  max(p.SeatsAdult, 1),

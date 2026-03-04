@@ -49,16 +49,10 @@ type FinalResults struct {
 }
 
 // SortAndFinalizeStage merges duplicates, filters invalid, and sorts results.
-type SortAndFinalizeStage struct {
-	stationRepo interface {
-		GetParentProvinceName(ctx context.Context, placeID string) string
-	}
-}
+type SortAndFinalizeStage struct{}
 
-func NewSortAndFinalizeStage(stationRepo interface {
-	GetParentProvinceName(ctx context.Context, placeID string) string
-}) *SortAndFinalizeStage {
-	return &SortAndFinalizeStage{stationRepo: stationRepo}
+func NewSortAndFinalizeStage() *SortAndFinalizeStage {
+	return &SortAndFinalizeStage{}
 }
 
 func (s *SortAndFinalizeStage) Name() string { return "sort_and_finalize" }
@@ -74,19 +68,15 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	pc := pipeline.FromContext(ctx)
 	const stage = "sort_and_finalize"
 
-	// Get to province name for response
-	t := pc.StartTimer(stage, "province_lookup")
-	if in.Filter.ToPlaceID != domain.UnknownPlace {
-		out.ToProvinceName = s.stationRepo.GetParentProvinceName(ctx, in.Filter.ToPlaceID)
-	}
-	t.Stop()
+	// Province name pre-resolved in Stage 1 (resolve_places)
+	out.ToProvinceName = in.Filter.ToProvinceName
 
 	if len(in.Trips) == 0 {
 		out.Trips = []domain.TripResult{}
 		return out, nil
 	}
 
-	t = pc.StartTimer(stage, "merge_loop")
+	t := pc.StartTimer(stage, "merge_loop")
 	// Merge duplicate travel options by group key.
 	// PHP TripResultApiV1Factory: when an existing trip is NOT bookable and a new
 	// travel option IS bookable, the trip-level data (segments, params, transfer_id)

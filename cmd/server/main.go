@@ -124,7 +124,7 @@ func main() {
 
 	stage6 := stage.NewCollectRefDataStage(stationRepo, operatorRepo, classRepo, imageRepo, reasonRepo, integrationRepo, tranRepo, rCache)
 	stage7 := stage.NewHydrateResultsStage()
-	stage8 := stage.NewSortAndFinalizeStage(stationRepo)
+	stage8 := stage.NewSortAndFinalizeStage()
 	stage9 := stage.NewSerializeResponseStage(publisher, cfg.Recheck.BaseURL)
 
 	pipeline := stage.NewSearchPipeline(

@@ -7,15 +7,6 @@ import (
 	"github.com/12go/f4/internal/domain"
 )
 
-// mockStationRepoForFinalize is a mock for the GetParentProvinceName dependency.
-type mockStationRepoForFinalize struct {
-	provinceName string
-}
-
-func (m *mockStationRepoForFinalize) GetParentProvinceName(_ context.Context, _ string) string {
-	return m.provinceName
-}
-
 func makeTripResult(tripKey string, bookable, validPrice bool, rankScore float64, integrationCode string) domain.TripResult {
 	seats := 0
 	if bookable {
@@ -44,7 +35,7 @@ func makeTripResult(tripKey string, bookable, validPrice bool, rankScore float64
 
 func TestSortAndFinalize_SortByRankScore(t *testing.T) {
 	// Matches PHP ChiefCookTest::testSortSearchResults
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 	in := HydratedResults{
 		Trips: []domain.TripResult{
 			makeTripResult("trip1", true, true, 99, "int1"),
@@ -71,7 +62,7 @@ func TestSortAndFinalize_SortByRankScore(t *testing.T) {
 }
 
 func TestSortAndFinalize_BookableBeforeNonBookable(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 	in := HydratedResults{
 		Trips: []domain.TripResult{
 			makeTripResult("notbookable", false, true, 100, "int1"),
@@ -95,7 +86,7 @@ func TestSortAndFinalize_BookableBeforeNonBookable(t *testing.T) {
 
 func TestSortAndFinalize_FilterNonBookable(t *testing.T) {
 	// Matches PHP testFinishCookOldFormatWhenOptionUnavailable behavior
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 	in := HydratedResults{
 		Trips: []domain.TripResult{
 			makeTripResult("notbookable", false, true, 100, "int1"),
@@ -118,7 +109,7 @@ func TestSortAndFinalize_FilterNonBookable(t *testing.T) {
 }
 
 func TestSortAndFinalize_FilterInvalidPrice(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 	in := HydratedResults{
 		Trips: []domain.TripResult{
 			makeTripResult("noprice", true, false, 100, "int1"),
@@ -142,7 +133,7 @@ func TestSortAndFinalize_FilterInvalidPrice(t *testing.T) {
 
 func TestSortAndFinalize_PresentIntegrations(t *testing.T) {
 	// Matches PHP ChiefCookTest: presentIntegration should contain all integration codes
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 	in := HydratedResults{
 		Trips: []domain.TripResult{
 			makeTripResult("trip1", true, true, 100, "integration0"),
@@ -164,7 +155,7 @@ func TestSortAndFinalize_PresentIntegrations(t *testing.T) {
 }
 
 func TestSortAndFinalize_MergeDuplicates(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 
 	// Two trips with the same GroupKey should be merged
 	trip1 := makeTripResult("trip1", true, true, 100, "int1")
@@ -197,7 +188,7 @@ func TestSortAndFinalize_MergeDuplicates(t *testing.T) {
 }
 
 func TestSortAndFinalize_DedupTravelOptions(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 
 	trip := makeTripResult("trip1", true, true, 100, "int1")
 	// Add a duplicate travel option with the same UniqueKey
@@ -227,7 +218,7 @@ func TestSortAndFinalize_DedupTravelOptions(t *testing.T) {
 }
 
 func TestSortAndFinalize_RecheckKeys(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 
 	// PHP ChiefCook: travel options with IsValid=false (no price binary or invalid price)
 	// go to recheck URLs, not main results.
@@ -262,7 +253,7 @@ func TestSortAndFinalize_RecheckKeys(t *testing.T) {
 }
 
 func TestSortAndFinalize_EmptyInput(t *testing.T) {
-	stage := NewSortAndFinalizeStage(&mockStationRepoForFinalize{})
+	stage := NewSortAndFinalizeStage()
 
 	in := HydratedResults{
 		Trips:  nil,
