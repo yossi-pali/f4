@@ -85,6 +85,14 @@ func main() {
 	tripPoolSetRepo := repository.NewTripPoolSetRepo(func(region string) *sqlx.DB {
 		return connMgr.TripPool(region)
 	})
+	if cfg.RefCache.EnableSets {
+		tripPoolSetRepo.EnableCache(cfg.RefCache.RefreshTTL, logger)
+		// Preload all configured regions so first request isn't slow
+		for _, region := range connMgr.Regions() {
+			tripPoolSetRepo.PreloadRegion(context.Background(), region)
+		}
+		logger.Info("trip_pool4_set cache enabled", zap.Duration("ttl", cfg.RefCache.RefreshTTL))
+	}
 	roundTripPriceRepo := repository.NewRoundTripPriceRepo(func(region string) *sqlx.DB {
 		return connMgr.TripPool(region)
 	})

@@ -147,20 +147,32 @@
 - **Post-state:** Runs as a 5th parallel goroutine in Stage 1 (0ms additional cost — overlaps with 4 existing calls). Stage 8 reads from filter: **302ms → 4ms**.
 - **Why:** Free optimization — the DB call was already happening in Stage 1's time window.
 
-## Performance Comparison: Master vs Perf Branch
+## Phase 9: Cache trip_pool4_set + Parallel Leg Fetches
+
+**Files:** `internal/repository/trip_pool_set.go`, `internal/stage/assemble_multi_leg.go`, `internal/config/config.go`, `cmd/server/main.go`, `internal/db/connection.go`
+
+- **What (cache):** Added in-memory caching of `trip_pool4_set` per region. On startup, all sets are preloaded (149K rows for TH). Controlled by `CACHE_SETS=true` env var with same TTL as other caches. On cache hit, `FindBySetIDs` is a pure map lookup (~0ms instead of ~280ms DB round-trip).
+- **What (parallel):** Combined `fetch_missing_keys` (same-day connection legs) and `fetch_multiday` (multi-day legs) into a single `errgroup` so they run in parallel instead of sequentially.
+- **Pre-state:** `buildConnections` did 3 sequential DB calls: FindBySetIDs (~280ms) → fetch_missing_keys (~300ms) → fetch_multiday (~300ms). Total `find_sets` timer: ~1,200ms.
+- **Post-state:** FindBySetIDs from cache (~0ms), fetch_missing_keys ∥ fetch_multiday (~310ms). Total `find_sets` timer: ~640ms.
+- **Why:** `find_sets` was the largest single hotspot. Set data rarely changes (connection configurations), perfect for caching. Same-day and multi-day fetches are independent queries with distinct trip keys.
+- **Impact:** `assemble_multi_leg.find_sets` dropped from **1,200ms → 640ms** (~560ms saved).
+
+## Performance Comparison: Master vs Perf Branch (Updated)
 
 **Comparison date:** 2026-03-04 | **15/15 PASS, 0 diffs**
 
 | Route | Master (baseline) | Perf (optimized) | Saved |
 |-------|------------------|-----------------|-------|
-| Bangkok→Chiang Mai | 5.7-6.7s | 4.1-4.3s | **~1.7s** |
-| Chiang Mai→Bangkok | 5.7-6.2s | 4.2-4.4s | **~1.6s** |
-| Surat Thani→Koh Phangan | 4.5-4.6s | 3.0-3.1s | **~1.5s** |
-| Surat Thani→Chiang Mai | 5.4-5.5s | 3.8-4.0s | **~1.5s** |
-| Bangkok→Phuket | 5.9-6.0s | 4.4-4.6s | **~1.5s** |
+| Bangkok→Chiang Mai | 6.4-7.5s | 4.1-4.8s | **~2.2s** |
+| Chiang Mai→Bangkok | 6.0-6.4s | 4.0-4.7s | **~1.8s** |
+| Surat Thani→Koh Phangan | 5.0-5.2s | 3.1-3.8s | **~1.7s** |
+| Surat Thani→Chiang Mai | 5.8-6.0s | 3.6-3.9s | **~2.1s** |
+| Bangkok→Phuket | 6.4-6.7s | 4.0-4.3s | **~2.3s** |
 
 **Remaining hotspots** (Bangkok→Chiang Mai, warm):
-- `assemble_multi_leg.find_sets`: 1,200ms — largest single query
-- `query_trips.sql_execute`: 950ms — main trip pool query
-- `collect_ref_data.images`: 600ms — 2 sequential round-trips (create + parallel load)
-- `build_filter.white_label`: 290ms — single DB round-trip
+- `query_trips.sql_execute`: 1,000ms — main trip pool query (10+ JOINs)
+- `assemble_multi_leg.find_sets`: 640ms — parallel fetch_missing_keys + fetch_multiday (1 round-trip each)
+- `collect_ref_data.images`: 640ms — 2 sequential round-trips (create + parallel load)
+- `collect_ref_data.translate`: 280ms — single DB round-trip
+- `collect_ref_data.weight_overrides`: 310ms — single DB round-trip

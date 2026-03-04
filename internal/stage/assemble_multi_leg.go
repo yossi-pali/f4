@@ -138,40 +138,21 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 			}
 		}
 	}
-	if len(missingKeys) > 0 {
-		keys := make([]string, 0, len(missingKeys))
-		for k := range missingKeys {
-			keys = append(keys, k)
-		}
-		tm := pc.StartTimer(stage, "fetch_missing_keys")
-		fetched, err := s.tripPoolRepo.FindByTripKeys(ctx, region, keys, in.SearchParams)
-		if err == nil {
-			for _, t := range fetched {
-				if _, exists := tripByKey[t.TripKey]; !exists {
-					tripByKey[t.TripKey] = t
-				}
-			}
-		}
-		// Non-fatal: if fetch fails, continue with what we have
-		tm.Stop()
-	}
-
-	// Fetch multi-day legs with adjusted godate.
-	// PHP PackAndConnectionSearch adjusts godate by trip2_day/trip3_day.
-	tm2 := pc.StartTimer(stage, "fetch_multiday")
-	if len(multiDayKeys) > 0 {
+	// Fetch same-day missing keys and multi-day keys in parallel.
+	// Both write to tripByKey under a shared mutex.
+	if len(missingKeys) > 0 || len(multiDayKeys) > 0 {
 		var mu sync.Mutex
-		mdg, mdctx := errgroup.WithContext(ctx)
-		for dayOffset, keySet := range multiDayKeys {
-			keys := make([]string, 0, len(keySet))
-			for k := range keySet {
+		fg, fctx := errgroup.WithContext(ctx)
+
+		// Same-day missing keys
+		if len(missingKeys) > 0 {
+			keys := make([]string, 0, len(missingKeys))
+			for k := range missingKeys {
 				keys = append(keys, k)
 			}
-			adjustedDate := in.Filter.Date.AddDate(0, 0, dayOffset)
-			adjustedParams := in.SearchParams
-			adjustedParams.GodateString = adjustedDate.Format("2006-01-02")
-			mdg.Go(func() error {
-				fetched, err := s.tripPoolRepo.FindByTripKeys(mdctx, region, keys, adjustedParams)
+			fg.Go(func() error {
+				tm := pc.StartTimer(stage, "fetch_missing_keys")
+				fetched, err := s.tripPoolRepo.FindByTripKeys(fctx, region, keys, in.SearchParams)
 				if err == nil {
 					mu.Lock()
 					for _, t := range fetched {
@@ -181,12 +162,39 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 					}
 					mu.Unlock()
 				}
+				tm.Stop()
 				return nil // non-fatal
 			})
 		}
-		mdg.Wait()
+
+		// Multi-day legs with adjusted godate (each day offset in parallel too)
+		for dayOffset, keySet := range multiDayKeys {
+			keys := make([]string, 0, len(keySet))
+			for k := range keySet {
+				keys = append(keys, k)
+			}
+			adjustedDate := in.Filter.Date.AddDate(0, 0, dayOffset)
+			adjustedParams := in.SearchParams
+			adjustedParams.GodateString = adjustedDate.Format("2006-01-02")
+			fg.Go(func() error {
+				tm := pc.StartTimer(stage, "fetch_multiday")
+				fetched, err := s.tripPoolRepo.FindByTripKeys(fctx, region, keys, adjustedParams)
+				if err == nil {
+					mu.Lock()
+					for _, t := range fetched {
+						if _, exists := tripByKey[t.TripKey]; !exists {
+							tripByKey[t.TripKey] = t
+						}
+					}
+					mu.Unlock()
+				}
+				tm.Stop()
+				return nil // non-fatal
+			})
+		}
+
+		fg.Wait()
 	}
-	tm2.Stop()
 
 	tm3 := pc.StartTimer(stage, "assembly")
 	searchDate := in.Filter.Date.Format("2006-01-02")

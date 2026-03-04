@@ -106,6 +106,15 @@ func (cm *ConnectionManager) TripPool(region string) *sqlx.DB {
 	return cm.defaultDB
 }
 
+// Regions returns the configured trip pool region codes.
+func (cm *ConnectionManager) Regions() []string {
+	regions := make([]string, 0, len(cm.tripPools))
+	for r := range cm.tripPools {
+		regions = append(regions, r)
+	}
+	return regions
+}
+
 // Close closes all database connections.
 func (cm *ConnectionManager) Close() error {
 	if cm.defaultDB != nil {

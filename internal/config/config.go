@@ -24,6 +24,7 @@ type RefCacheConfig struct {
 	EnableClasses     bool          `mapstructure:"enable_classes"`
 	EnableReasons     bool          `mapstructure:"enable_reasons"`
 	EnableIntegration bool          `mapstructure:"enable_integration"`
+	EnableSets        bool          `mapstructure:"enable_sets"`
 	RefreshTTL        time.Duration `mapstructure:"refresh_ttl"`
 }
 
@@ -97,6 +98,7 @@ func Load() (*Config, error) {
 	v.BindEnv("ref_cache.enable_classes", "CACHE_CLASSES")
 	v.BindEnv("ref_cache.enable_reasons", "CACHE_REASONS")
 	v.BindEnv("ref_cache.enable_integration", "CACHE_INTEGRATION")
+	v.BindEnv("ref_cache.enable_sets", "CACHE_SETS")
 	v.BindEnv("ref_cache.refresh_ttl", "CACHE_REFRESH_TTL")
 
 	v.BindEnv("database.max_open_conns", "DB_MAX_OPEN_CONNS")
@@ -123,6 +125,7 @@ func Load() (*Config, error) {
 	cfg.RefCache.EnableClasses = v.GetBool("ref_cache.enable_classes")
 	cfg.RefCache.EnableReasons = v.GetBool("ref_cache.enable_reasons")
 	cfg.RefCache.EnableIntegration = v.GetBool("ref_cache.enable_integration")
+	cfg.RefCache.EnableSets = v.GetBool("ref_cache.enable_sets")
 	cfg.RefCache.RefreshTTL = v.GetDuration("ref_cache.refresh_ttl")
 
 	// Load feature flags from env
