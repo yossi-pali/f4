@@ -104,6 +104,8 @@ type rawTripRow struct {
 	ArrStationID   int    `db:"arr_station_id"`
 	SetID          *int   `db:"set_id"`
 
+	DepVehclassID    string `db:"dep_vehclass_id"`
+	ArrVehclassID    string `db:"arr_vehclass_id"`
 	DepTimezoneName  string `db:"dep_timezone_name"`
 	ArrTimezoneName  string `db:"arr_timezone_name"`
 	DepCountryID     string `db:"dep_country_id"`
@@ -164,16 +166,204 @@ type rawTripRow struct {
 	Arr         string `db:"arr"`
 }
 
+// FindByTripKeys fetches trips by trip_key, returning full RawTrip data with prices.
+// This is used by AssembleMultiLeg to fetch connection legs that weren't in the
+// main search results (e.g., legs whose station pairs don't match the route_place).
+// PHP's PackAndConnectionSearch fetches legs this way.
+func (r *TripPoolRepo) FindByTripKeys(ctx context.Context, region string, tripKeys []string, baseParams SearchParams) ([]domain.RawTrip, error) {
+	if len(tripKeys) == 0 {
+		return nil, nil
+	}
+
+	conn := r.connMgr.TripPool(region)
+
+	// Copy the price-related params but override FROM to use trip_pool4 directly
+	p := SearchParams{
+		GodateString: baseParams.GodateString,
+		SeatsAdult:   baseParams.SeatsAdult,
+		SeatsChild:   baseParams.SeatsChild,
+		SeatsInfant:  baseParams.SeatsInfant,
+		AgentID:      baseParams.AgentID,
+		Lang:         baseParams.Lang,
+		FXCode:       baseParams.FXCode,
+		RecheckLevel: baseParams.RecheckLevel,
+		PriceMode:    baseParams.PriceMode,
+		TripKeys:     tripKeys,
+	}
+
+	query, args := r.buildTripKeyQuery(p)
+
+	var rawRows []rawTripRow
+	err := db.WithRetry(func() error {
+		return conn.SelectContext(ctx, &rawRows, query, args...)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("trip pool find by keys: %w", err)
+	}
+
+	trips := make([]domain.RawTrip, 0, len(rawRows))
+	for _, row := range rawRows {
+		trip := row.toDomainTrip()
+		if len(row.PriceBinStr) > 0 {
+			tp, err := price.Decode(row.PriceBinStr)
+			if err == nil {
+				trip.Price = tp
+			}
+		}
+		trips = append(trips, trip)
+	}
+	return trips, nil
+}
+
+// buildTripKeyQuery builds the SQL for fetching trips by trip_key.
+// Uses FROM trip_pool4 tp directly (no route_place constraint).
+func (r *TripPoolRepo) buildTripKeyQuery(p SearchParams) (string, []interface{}) {
+	var selectArgs []interface{}
+	var whereArgs []interface{}
+
+	// SELECT clause params (same as buildSearchQuery)
+	selectArgs = append(selectArgs, p.GodateString) // DATE(?)
+	selectArgs = append(selectArgs, p.GodateString, p.SeatsAdult, p.SeatsChild, p.SeatsInfant,
+		p.AgentID, p.Lang, p.FXCode, p.RecheckLevel, p.PriceMode)
+	selectArgs = append(selectArgs, p.GodateString) // godate CONVERT_TZ
+	selectArgs = append(selectArgs, p.GodateString) // dep
+	selectArgs = append(selectArgs, p.GodateString) // arr
+
+	// WHERE clause
+	var whereClauses []string
+	whereClauses = append(whereClauses, "operator.bookable = 1", "seller.bookable = 1")
+	whereClauses = append(whereClauses, "tp.trip_key IN ("+placeholders(len(p.TripKeys))+")")
+	for _, key := range p.TripKeys {
+		whereArgs = append(whereArgs, key)
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// FROM is simple: trip_pool4 tp
+	// The godate param goes after FROM args (there are none here) in the JOIN clause.
+	var fromArgs []interface{}
+	fromArgs = append(fromArgs, p.GodateString) // trip_price.godate = ?
+
+	query := fmt.Sprintf(`/* f4-leg-fetch */
+SELECT DISTINCT
+    tp.trip_key,
+    COALESCE(NULLIF(MAX(trip_price.duration), 0), tp.duration) AS duration,
+    COALESCE(trip_price.departure_time, tp.departure_time) AS departure_time,
+    COALESCE(trip_price.departure2_time, 0) AS departure2_time,
+    COALESCE(trip_price.departure3_time, 0) AS departure3_time,
+    tp.class_id, COALESCE(tp.official_id, '') AS official_id, tp.operator_id, COALESCE(tp.vehclass_id, '') AS vehclass_id,
+    tp.from_id AS dep_station_id, tp.to_id AS arr_station_id,
+    IF(tp.set_id = 0, NULL, tp.set_id) AS set_id,
+    COALESCE(station_from.vehclass_id, '') AS dep_vehclass_id,
+    COALESCE(station_to.vehclass_id, '') AS arr_vehclass_id,
+    station_from.province_id AS dep_province_id,
+    COALESCE(station_from.hide_departure, 0) AS dep_hide_departure,
+    province_from.country_id AS dep_country_id,
+    timezone_from.timezone_name AS dep_timezone_name,
+    station_to.province_id AS arr_province_id,
+    province_to.country_id AS arr_country_id,
+    timezone_to.timezone_name AS arr_timezone_name,
+    COALESCE(class.vehclasses, '') AS vehclasses,
+    (operator.bookable AND seller.bookable) AS op_bookable,
+    operator.seller_id, COALESCE(operator.master_id, 0) AS master_operator_id,
+    COALESCE(integration.integration_code, 'manual') AS integration_code,
+    COALESCE(integration.integration_id, 0) AS integration_id,
+    COALESCE(integration.chunk_key, '') AS chunk_key,
+    COALESCE(tpe.rating_avg, 0) AS rating_avg,
+    COALESCE(tpe.rating_count, 0) AS rating_count,
+    COALESCE(tpe.sales_per_month, 0) AS sales_per_month,
+    COALESCE(tpe.baggage_free_weight, 0) AS baggage_free_weight,
+    COALESCE(tpe.baggage_free_hand, 0) AS baggage_free_hand,
+    COALESCE(tpe.baggage_free_checked, 0) AS baggage_free_checked,
+    COALESCE(tpe.amenities, '') AS amenities,
+    COALESCE(tpe.ticket_type, '') AS ticket_type,
+    COALESCE(tpe.sr_marker, '') AS sr_marker,
+    COALESCE(tpe.is_meta, 0) AS is_meta,
+    COALESCE(tpe.is_ignore_group_time, 0) AS is_ignore_group_time,
+    COALESCE(tpe.is_f_refundable, 0) AS is_f_refundable,
+    COALESCE(tpe.trip_id, 0) AS trip_id,
+    COALESCE(tpe.route_id, 0) AS route_id,
+    COALESCE(tpe.hide_days, 0) AS hide_days,
+    (tpe.hide_days IS NOT NULL) AS hide_days_is_set,
+    COALESCE(tpe.advance_book, 0) AS advance_book,
+    COALESCE(tpe.cancel_hours, 0) AS cancel_hours,
+    COALESCE(tpe.confirm_minutes, 0) AS confirm_minutes,
+    COALESCE(tpe.avg_confirm_time, 0) AS avg_confirm_time,
+    COALESCE(seller.price_restriction, 0) AS price_restriction,
+    COALESCE(tpd.new_trip_flag, 0) AS new_trip_flag,
+    COALESCE(tpd.special_deal_flag, 0) AS special_deal_flag,
+    COALESCE(tpd.rank_score_sales, 0) AS rank_score_sales,
+    COALESCE(tpd.rank_score_formula, 0) AS rank_score_formula,
+    COALESCE(tpd.rank_score_formula_revenue, 0) AS rank_score_formula_revenue,
+    COALESCE(tpd.rank_score_sales_real_90_days, 0) AS rank_score_sales_real_90_days,
+    COALESCE(tpd.bookings, 0) AS bookings_30d,
+    COALESCE(tpd.bookings_solo, 0) AS bookings_30d_solo,
+    MAX(COALESCE(trip_price.round_trip_discount_pct, 0)) AS round_trip_discount_pct,
+    price_5_6_pool(
+        tp.trip_key, DATE(?),
+        UNIX_TIMESTAMP(CONVERT_TZ(
+            CONCAT(?, ' ', SEC_TO_TIME(COALESCE(trip_price.departure_time, tp.departure_time) * 60)),
+            timezone_from.timezone_name, 'UTC'
+        )),
+        ?, ?, ?, ?, ?, ?, ?, ?,
+        trip_price.godate, trip_price.seats, 0, 0,
+        trip_price.fxcode, trip_price.netprice, NULL, NULL,
+        trip_price.topup_fxcode, trip_price.topup, NULL, NULL,
+        trip_price.available_seats, trip_price.reason_id, trip_price.reason_param, trip_price.adv_book,
+        UNIX_TIMESTAMP(trip_price.stamp),
+        trip_price.duration * 60, trip_price.route_id, trip_price.trip_id
+    ) AS price_bin_str,
+    FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(
+        CONCAT(?, ' ', SEC_TO_TIME(COALESCE(trip_price.departure_time, tp.departure_time) * 60)),
+        timezone_from.timezone_name, 'UTC'
+    ))) AS godate,
+    COALESCE(UNIX_TIMESTAMP(trip_price.stamp), 0) AS godate_stamp,
+    CONCAT(?, ' ', SEC_TO_TIME(COALESCE(trip_price.departure_time, tp.departure_time) * 60)) AS dep,
+    DATE_ADD(
+        CONCAT(?, ' ', SEC_TO_TIME(COALESCE(trip_price.departure_time, tp.departure_time) * 60)),
+        INTERVAL COALESCE(NULLIF(MAX(trip_price.duration), 0), tp.duration) MINUTE
+    ) AS arr
+FROM trip_pool4 tp
+JOIN station station_from ON station_from.station_id = tp.from_id
+JOIN province province_from ON province_from.province_id = station_from.province_id
+JOIN timezone timezone_from ON timezone_from.timezone_id = province_from.timezone_id
+JOIN station station_to ON station_to.station_id = tp.to_id
+JOIN province province_to ON province_to.province_id = station_to.province_id
+JOIN timezone timezone_to ON timezone_to.timezone_id = province_to.timezone_id
+JOIN class ON class.class_id = tp.class_id
+JOIN operator ON operator.operator_id = tp.operator_id
+JOIN seller ON seller.seller_id = operator.seller_id
+LEFT JOIN integration ON integration.seller_id = operator.seller_id
+    AND integration.integration_id = (SELECT MIN(i2.integration_id) FROM integration i2 WHERE i2.seller_id = operator.seller_id)
+LEFT JOIN trip_pool4_extra tpe ON tpe.trip_key = tp.trip_key
+LEFT JOIN trip_pool4_price trip_price ON trip_price.trip_key = tp.trip_key AND trip_price.godate = ?
+LEFT JOIN trip_pool4_departure_extra tpd ON tpd.trip_key = trip_price.trip_key
+    AND tpd.departure_time = trip_price.departure_time
+    AND tpd.departure2_time = trip_price.departure2_time
+    AND tpd.departure3_time = trip_price.departure3_time
+WHERE %s
+GROUP BY tp.trip_key, trip_price.departure_time, trip_price.departure2_time, trip_price.departure3_time`,
+		whereSQL)
+
+	args := make([]interface{}, 0, len(selectArgs)+len(fromArgs)+len(whereArgs))
+	args = append(args, selectArgs...)
+	args = append(args, fromArgs...)
+	args = append(args, whereArgs...)
+
+	return query, args
+}
+
 func (row *rawTripRow) toDomainTrip() domain.RawTrip {
 	return domain.RawTrip{
 		TripKey: row.TripKey, Duration: row.Duration,
 		DepartureTime: row.DepartureTime, Departure2Time: row.Departure2Time, Departure3Time: row.Departure3Time,
 		ClassID: row.ClassID, OfficialID: row.OfficialID, OperatorID: row.OperatorID, VehclassID: row.VehclassID,
 		DepStationID: row.DepStationID, ArrStationID: row.ArrStationID, SetID: row.SetID,
+		DepVehclassID: row.DepVehclassID, ArrVehclassID: row.ArrVehclassID,
 		DepTimezoneName: row.DepTimezoneName, ArrTimezoneName: row.ArrTimezoneName,
 		DepCountryID: row.DepCountryID, ArrCountryID: row.ArrCountryID,
 		DepProvinceID: row.DepProvinceID, ArrProvinceID: row.ArrProvinceID,
-		DepHideDeparture: row.DepHideDeparture != 0,
+		DepHideDeparture: row.DepHideDeparture == 1, // PHP uses === 1, not != 0
 		OpBookable: row.OpBookable != 0, SellerID: row.SellerID, MasterOperatorID: row.MasterOperatorID,
 		PriceRestriction: row.PriceRestriction,
 		IntegrationCode: row.IntegrationCode, IntegrationID: row.IntegrationID, ChunkKey: row.ChunkKey,
@@ -335,6 +525,8 @@ SELECT DISTINCT
     tp.class_id, COALESCE(tp.official_id, '') AS official_id, tp.operator_id, COALESCE(tp.vehclass_id, '') AS vehclass_id,
     tp.from_id AS dep_station_id, tp.to_id AS arr_station_id,
     IF(tp.set_id = 0, NULL, tp.set_id) AS set_id,
+    COALESCE(station_from.vehclass_id, '') AS dep_vehclass_id,
+    COALESCE(station_to.vehclass_id, '') AS arr_vehclass_id,
     station_from.province_id AS dep_province_id,
     COALESCE(station_from.hide_departure, 0) AS dep_hide_departure,
     province_from.country_id AS dep_country_id,
@@ -413,6 +605,7 @@ JOIN class ON class.class_id = tp.class_id
 JOIN operator ON operator.operator_id = tp.operator_id
 JOIN seller ON seller.seller_id = operator.seller_id
 LEFT JOIN integration ON integration.seller_id = operator.seller_id
+    AND integration.integration_id = (SELECT MIN(i2.integration_id) FROM integration i2 WHERE i2.seller_id = operator.seller_id)
 LEFT JOIN trip_pool4_extra tpe ON tpe.trip_key = tp.trip_key
 LEFT JOIN trip_pool4_price trip_price ON trip_price.trip_key = tp.trip_key AND trip_price.godate = ?
 LEFT JOIN trip_pool4_departure_extra tpd ON tpd.trip_key = trip_price.trip_key

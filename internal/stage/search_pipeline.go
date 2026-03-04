@@ -6,6 +6,7 @@ import (
 
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/pipeline"
+	"github.com/12go/f4/internal/repository"
 )
 
 // SearchPipelineInput is the top-level input to the search pipeline.
@@ -92,9 +93,21 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 
 	// Stage 5a+5b: Parallel multi-leg assembly and round trip enrichment
 	multiLegInput := AssembleMultiLegInput{
-		DirectTrips:   filtered.DirectTrips,
-		ConnectionIDs: filtered.ConnectionIDs,
-		Filter:        filtered.Filter,
+		DirectTrips:             filtered.DirectTrips,
+		ConnectionIDs:           filtered.ConnectionIDs,
+		ConnectionCompositeRows: filtered.ConnectionCompositeRows,
+		Filter:                  filtered.Filter,
+		SearchParams: repository.SearchParams{
+			GodateString: filtered.Filter.Date.Format("2006-01-02"),
+			SeatsAdult:   filtered.Filter.SeatsAdult,
+			SeatsChild:   filtered.Filter.SeatsChild,
+			SeatsInfant:  filtered.Filter.SeatsInfant,
+			AgentID:      filtered.Filter.AgentID,
+			Lang:         filtered.Filter.Lang,
+			FXCode:       filtered.Filter.FXCode,
+			RecheckLevel: filtered.Filter.RecheckLevel,
+			PriceMode:    filtered.Filter.PriceMode,
+		},
 	}
 	roundTripInput := EnrichRoundTripsInput{
 		DirectTrips: filtered.DirectTrips,
@@ -115,9 +128,11 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 			all = append(all, ml.Connections...)
 			all = append(all, ml.Autopacks...)
 			return CollectRefDataInput{
-				AllTrips:      all,
-				AllStationIDs: filtered.AllStationIDs,
-				Filter:        filtered.Filter,
+				AllTrips:                all,
+				AllStationIDs:           filtered.AllStationIDs,
+				PreFilterRecheckEntries: filtered.PreFilterRecheckEntries,
+				PendingPackRechecks:     ml.PendingPackRechecks,
+				Filter:                  filtered.Filter,
 			}
 		},
 	)

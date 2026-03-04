@@ -14,11 +14,14 @@ import (
 
 // HydratedResults is the output of Stage 7.
 type HydratedResults struct {
-	Trips     []domain.TripResult
-	Operators map[int]domain.Operator
-	Stations  map[int]domain.Station
-	Classes   map[int]domain.VehicleClass
-	Filter    domain.SearchFilter
+	Trips                   []domain.TripResult
+	Operators               map[int]domain.Operator
+	Stations                map[int]domain.Station
+	Classes                 map[int]domain.VehicleClass
+	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // passed through from FilterRawTrips
+	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
+	ManualIntegrationID     int                            // for chunk key computation in SortAndFinalize
+	Filter                  domain.SearchFilter
 }
 
 // HydrateResultsStage builds TripResult DTOs from raw trips and reference data.
@@ -30,10 +33,13 @@ func (s *HydrateResultsStage) Name() string { return "hydrate_results" }
 
 func (s *HydrateResultsStage) Execute(_ context.Context, in EnrichedTrips) (HydratedResults, error) {
 	out := HydratedResults{
-		Operators: in.Operators,
-		Stations:  in.Stations,
-		Classes:   in.Classes,
-		Filter:    in.Filter,
+		Operators:               in.Operators,
+		Stations:                in.Stations,
+		Classes:                 in.Classes,
+		PreFilterRecheckEntries: in.PreFilterRecheckEntries,
+		PendingPackRechecks:     in.PendingPackRechecks,
+		ManualIntegrationID:     in.ManualIntegrationID,
+		Filter:                  in.Filter,
 	}
 
 	results := make([]domain.TripResult, 0, len(in.Trips))
@@ -100,7 +106,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		ParamsArrTime:    trimDateTime(raw.Arr),
 		ParamsDuration:   raw.Duration,
 		ParamsStops:      0,
-		ParamsVehclasses: splitVehclass(raw.VehclassID),
+		ParamsVehclasses: buildVehclasses(raw.Vehclasses, raw.DepVehclassID, raw.ArrVehclassID),
 		ParamsOperators:  []int{raw.OperatorID},
 		ParamsBookable:   raw.Price.Avail,
 		ParamsStatus:     0,
@@ -136,9 +142,14 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		}
 	}
 
-	// TransferID = MD5(operatorID;fromID;toID;vehclassID;classID)
+	// TransferID = MD5(operators[0];from;to;vehclasses[0];segments[0].class)
+	// Matches PHP TripResultApiV1::jsonSerialize() which uses params->vehclasses[0].
+	transferVehclass := raw.VehclassID
+	if vehclasses := buildVehclasses(raw.Vehclasses, raw.DepVehclassID, raw.ArrVehclassID); len(vehclasses) > 0 {
+		transferVehclass = vehclasses[0]
+	}
 	tr.TransferID = md5Hash(fmt.Sprintf("%d;%d;%d;%s;%d",
-		raw.OperatorID, raw.DepStationID, raw.ArrStationID, raw.VehclassID, raw.ClassID))
+		raw.OperatorID, raw.DepStationID, raw.ArrStationID, transferVehclass, raw.ClassID))
 
 	// Build group key for merging duplicates (matches PHP TripResultBaseFactory::getTripId)
 	tr.GroupKey = buildTripUniqueKey(raw)
@@ -159,7 +170,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		Type:                "route",
 		TripID:              raw.TripKey,
 		OfficialID:          raw.OfficialID,
-		Vehclasses:          splitVehclass(raw.VehclassID),
+		Vehclasses:          buildVehclasses(raw.Vehclasses, raw.DepVehclassID, raw.ArrVehclassID),
 		Photos:              photos,
 		Price:               nil,
 		Rating:              nil,
@@ -200,7 +211,7 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		RatingCount:       nilIntIfZero(raw.RatingCount),
 		Amenities:         splitAmenities(raw.Amenities),
 		TicketType:        defaultStr(raw.TicketType, "default"),
-		ConfirmationTime:  confirmDays(raw.ConfirmMinutes),
+		ConfirmationTime:  confirmDays(raw.ConfirmMinutes, raw.AvgConfirmTime),
 		ConfirmMinutes:    raw.ConfirmMinutes,
 		ConfirmMessage:    buildConfirmMessage(raw.AvgConfirmTime),
 		Cancellation:      cancelValue(raw.CancelHours, raw.IsFRefundable),
@@ -225,6 +236,11 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 		Bookings30d:       raw.Bookings30d,
 		Bookings30dSolo:   raw.Bookings30dSolo,
 		ScoreSortingRaw:   calculateRankScoreBySales(raw),
+
+		// Pack recheck
+		IsPack:      raw.PackID > 0,
+		HeadTripKey: raw.HeadTripKey,
+		PackLegs:    raw.ConnectionLegs, // per-leg data for /searchpm URL generation
 	}
 
 	// Price breakdown from adult fare (conditional, matching PHP TravelOptionBaseFactory)
@@ -313,6 +329,25 @@ func splitVehclass(id string) []string {
 	return []string{id}
 }
 
+// buildVehclasses matches PHP SegmentsApiV1Factory vehclasses logic:
+//  1. If class.vehclasses (comma-separated) is set, split it.
+//  2. Otherwise use [dep_vehclass_id], and if arr_vehclass_id differs, add it too.
+//  3. If dep_vehclass_id is empty, fall back to tp.vehclass_id.
+func buildVehclasses(classVehclasses, depVehclassID, arrVehclassID string) []string {
+	if classVehclasses != "" {
+		return strings.Split(classVehclasses, ",")
+	}
+	// Fall back: PHP uses station_from.vehclass_id and station_to.vehclass_id
+	if depVehclassID == "" {
+		return []string{}
+	}
+	result := []string{depVehclassID}
+	if arrVehclassID != "" && arrVehclassID != depVehclassID {
+		result = append(result, arrVehclassID)
+	}
+	return result
+}
+
 func splitAmenities(s string) []string {
 	if s == "" {
 		return []string{}
@@ -380,42 +415,59 @@ func buildBookingURI(raw domain.RawTrip, godate string) string {
 }
 
 func buildBuyItems(raw domain.RawTrip, godate string) []domain.BuyItemV1 {
+	// PHP TravelOptionApiV1Factory: first BuyItem always uses the overall
+	// from/to (dep_station_id → arr_station_id), even for connections.
+	// For connections, arr_station_id is the final destination (last leg's to).
+	// Per-leg BuyItems are only added for pack trips (handled separately).
 	return []domain.BuyItemV1{
 		{
 			TripID: raw.TripKey,
 			FromID: raw.DepStationID,
 			ToID:   raw.ArrStationID,
 			Date:   godate,
-			Date2:  nil,
-			Date3:  nil,
 		},
 	}
 }
 
-func confirmDays(minutes int) int {
-	if minutes == 0 {
-		return 1 // instant confirmation
-	}
-	days := minutes / 1440
-	if days < 1 {
-		return 1
-	}
-	return days
+// formatGodateUnix formats a unix timestamp into "YYYY-MM-DD-HH-MM-SS" in Bangkok timezone.
+func formatGodateUnix(ts int64) string {
+	loc, _ := time.LoadLocation("Asia/Bangkok")
+	t := time.Unix(ts, 0).In(loc)
+	return t.Format("2006-01-02-15-04-05")
 }
 
+// confirmDays matches PHP TravelOptionApiV1Factory confirmation_time logic.
+// PHP has two paths:
+//   1. If avg_confirm_time is set → isInstant (ceil(secs/60)<=5) ? 0 : 1
+//   2. Else fallback → abs(ceil(confirm_minutes/60/24))
+func confirmDays(minutes int, avgConfirmTimeSecs int) int {
+	if avgConfirmTimeSecs > 0 {
+		// Path 1: avg_confirm_time drives the value
+		avgMinutes := int(math.Ceil(float64(avgConfirmTimeSecs) / 60.0))
+		if avgMinutes <= 5 {
+			return 0 // instant confirmation
+		}
+		return 1 // non-instant but has avg_confirm_time
+	}
+	// Path 2: fallback to ceil(confirm_minutes/60/24)
+	if minutes <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(minutes) / 60.0 / 24.0))
+}
+
+// cancelValue matches PHP TravelOptionApiV1Factory: cancellation = (int)cancel_hours.
+// PHP does NOT gate on is_f_refundable for the cancellation value.
 func cancelValue(hours int, refundable bool) int {
-	if refundable {
-		return hours
-	}
-	return 0
+	return hours
 }
 
+// cancelMessage matches PHP TravelOptionApiV1Factory:
+// cancellation > 0 → "Cancellation possible (check rules)", else → "No refunds, no cancellation".
+// PHP source spells it "Cancelation" but getTran() returns "Cancellation" (two l's).
 func cancelMessage(hours int, refundable bool) string {
-	if !refundable && hours == 0 {
-		return "No refunds, no cancellation"
-	}
-	if refundable {
-		return fmt.Sprintf("Full refund up to %d hours before departure", hours)
+	if hours > 0 {
+		return "Cancellation possible (check rules)"
 	}
 	return "No refunds, no cancellation"
 }
@@ -602,7 +654,7 @@ func getRawTripField(raw domain.RawTrip, field string) string {
 
 // buildFullRefundUntil calculates the full refund deadline, matching PHP
 // TravelOptionBaseFactory::buildFullRefundUntil().
-// Returns "YYYY-MM-DD HH:MM" or nil.
+// Returns "YYYY-MM-DD HH:MM UTC+0700" or nil.
 func buildFullRefundUntil(raw domain.RawTrip) *string {
 	if !raw.IsFRefundable || raw.CancelHours == 0 {
 		return nil
@@ -623,6 +675,6 @@ func buildFullRefundUntil(raw domain.RawTrip) *string {
 	if result.Before(now) {
 		return nil
 	}
-	s := result.Format("2006-01-02 15:04")
+	s := result.Format("2006-01-02 15:04") + " UTC" + result.Format("-0700")
 	return &s
 }

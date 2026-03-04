@@ -11,21 +11,25 @@ import (
 
 // CollectRefDataInput is the input for Stage 6.
 type CollectRefDataInput struct {
-	AllTrips       []domain.RawTrip
-	AllStationIDs  []int // station IDs from ALL raw trips (before filtering), for station collection
-	Filter         domain.SearchFilter
+	AllTrips                []domain.RawTrip
+	AllStationIDs           []int // station IDs from ALL raw trips (before filtering), for station collection
+	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // recheck data from ALL raw trips (before filtering)
+	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
+	Filter                  domain.SearchFilter
 }
 
 // EnrichedTrips is the output of Stage 6.
 type EnrichedTrips struct {
-	Trips       []domain.RawTrip
-	Operators   map[int]domain.Operator
-	Stations    map[int]domain.Station
-	Classes     map[int]domain.VehicleClass
-	Images      *domain.ImageCollection
-	ReasonTexts map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
-	ManualIntegrationID int // integration_id for integration_code='manual' (fallback for sellers without integration row)
-	Filter      domain.SearchFilter
+	Trips                   []domain.RawTrip
+	Operators               map[int]domain.Operator
+	Stations                map[int]domain.Station
+	Classes                 map[int]domain.VehicleClass
+	Images                  *domain.ImageCollection
+	ReasonTexts             map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
+	ManualIntegrationID     int // integration_id for integration_code='manual' (fallback for sellers without integration row)
+	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // passed through from FilterRawTrips
+	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
+	Filter                  domain.SearchFilter
 }
 
 // CollectRefDataStage batch-loads all reference data (operators, stations, classes, images) in parallel.
@@ -63,8 +67,10 @@ func (s *CollectRefDataStage) Name() string { return "collect_ref_data" }
 
 func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInput) (EnrichedTrips, error) {
 	out := EnrichedTrips{
-		Trips:  in.AllTrips,
-		Filter: in.Filter,
+		Trips:                   in.AllTrips,
+		PreFilterRecheckEntries: in.PreFilterRecheckEntries,
+		PendingPackRechecks:     in.PendingPackRechecks,
+		Filter:                  in.Filter,
 	}
 
 	if len(in.AllTrips) == 0 {
@@ -84,14 +90,23 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	reasonIDSet := make(map[int]struct{})
 
 	for _, t := range in.AllTrips {
-		operatorIDSet[t.OperatorID] = struct{}{}
+		// PHP's prepareRawTrips collects operators/classes only from trips
+		// that survive its filtering. Assembled connections (set_id > 0) are
+		// built from leg trip data and may include operators/classes that PHP
+		// filters out during connection assembly (e.g., godate mismatches,
+		// departure time checks). Only collect operators/classes from direct
+		// trips to match PHP behavior.
+		isConnection := t.SetID != nil && *t.SetID > 0
+		if !isConnection {
+			operatorIDSet[t.OperatorID] = struct{}{}
+			classIDSet[t.ClassID] = struct{}{}
+			pairSet[repository.OperatorClassPair{OperatorID: t.OperatorID, ClassID: t.ClassID}] = struct{}{}
+		}
 		stationIDSet[t.DepStationID] = struct{}{}
 		stationIDSet[t.ArrStationID] = struct{}{}
-		classIDSet[t.ClassID] = struct{}{}
 		if t.RouteID > 0 {
 			routeIDSet[t.RouteID] = struct{}{}
 		}
-		pairSet[repository.OperatorClassPair{OperatorID: t.OperatorID, ClassID: t.ClassID}] = struct{}{}
 		if t.Price.ReasonID > 0 {
 			reasonIDSet[t.Price.ReasonID] = struct{}{}
 		}

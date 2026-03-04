@@ -1,6 +1,12 @@
-# Binary
+# Binaries
 f4
 f4.exe
+*.exe
+*.log
+
+# Temp/debug files
+tmp_*
+*-test.json
 
 # Environment
 .env

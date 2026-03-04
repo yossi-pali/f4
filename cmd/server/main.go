@@ -92,7 +92,7 @@ func main() {
 	stage2 := stage.NewBuildFilterStage(dataSecRepo, whiteLabelRepo, flags)
 	stage3 := stage.NewQueryTripsStage(tripPoolRepo)
 	stage4 := stage.NewFilterRawTripsStage()
-	stage5a := stage.NewAssembleMultiLegStage(tripPoolSetRepo, autopackRepo, regionResolver)
+	stage5a := stage.NewAssembleMultiLegStage(tripPoolSetRepo, tripPoolRepo, autopackRepo, regionResolver)
 	stage5b := stage.NewEnrichRoundTripsStage(roundTripPriceRepo, publisher, regionResolver)
 	reasonRepo := repository.NewReasonRepo(defaultDB)
 	integrationRepo := repository.NewIntegrationRepo(defaultDB)

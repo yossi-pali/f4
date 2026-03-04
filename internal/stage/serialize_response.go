@@ -53,8 +53,10 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 	}
 
 	// Build recheck URLs (one per integration chunk group, matching PHP Rechecker)
-	if len(in.RecheckGroups) > 0 {
+	if len(in.RecheckGroups) > 0 || len(in.PackRecheckGroups) > 0 {
 		resp.Recheck = s.buildRecheckURLs(in)
+		// PHP Rechecker appends pack recheck URLs after regular recheck URLs
+		resp.Recheck = append(resp.Recheck, s.buildPackManualRecheckURLs(in)...)
 	}
 	if resp.Recheck == nil {
 		resp.Recheck = []string{}
@@ -73,7 +75,7 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 
 // buildRecheckURLs generates one URL per RecheckGroup, matching PHP Rechecker::getRecheckUrls.
 // URL is built manually (not via url.Values) to match PHP's exact parameter order and encoding:
-// commas in f/t are NOT percent-encoded; search_url IS percent-encoded.
+// commas in f/t are NOT percent-encoded; search_url IS percent-encoded (PHP uses http_build_query).
 func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 	if s.recheckBaseURL == "" {
 		return nil
@@ -93,8 +95,6 @@ func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 		b.WriteString(intsToString(g.ToStationIDs))
 		b.WriteString("&d=")
 		b.WriteString(dateStr)
-		b.WriteString("&i=")
-		b.WriteString(strconv.Itoa(g.IntegrationID))
 		b.WriteString("&sa=")
 		b.WriteString(strconv.Itoa(in.Filter.SeatsAdult))
 		b.WriteString("&sc=")
@@ -106,6 +106,59 @@ func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 		if in.Filter.SearchURL != "" {
 			b.WriteString("&search_url=")
 			b.WriteString(url.QueryEscape(in.Filter.SearchURL))
+		}
+		b.WriteString("&visitorId=")
+		b.WriteString(in.Filter.VisitorID)
+
+		urls = append(urls, b.String())
+	}
+
+	return urls
+}
+
+// buildPackManualRecheckURLs generates /searchpm URLs for manual pack recheck groups.
+// PHP Rechecker: foreach ($recheck->manualPacks as $recheckGroup) { ... }
+// URL format: /searchpm?t=headTripKey1 tripKey1 date1,headTripKey2 tripKey2 date2&l=...&d=...&...
+func (s *SerializeResponseStage) buildPackManualRecheckURLs(in FinalResults) []string {
+	if s.recheckBaseURL == "" || len(in.PackRecheckGroups) == 0 {
+		return nil
+	}
+
+	// Derive /searchpm base URL from /searchr base URL
+	packBaseURL := strings.Replace(s.recheckBaseURL, "/searchr", "/searchpm", 1)
+	dateStr := in.Filter.Date.Format("2006-01-02")
+
+	urls := make([]string, 0, len(in.PackRecheckGroups))
+	for _, g := range in.PackRecheckGroups {
+		if len(g.Entries) == 0 {
+			continue
+		}
+
+		// Build t= parameter: "headTripKey tripKey date" joined by commas
+		tripParts := make([]string, 0, len(g.Entries))
+		for _, e := range g.Entries {
+			tripParts = append(tripParts, e.HeadTripKey+" "+e.TripKey+" "+e.Date)
+		}
+
+		var b strings.Builder
+		b.WriteString(packBaseURL)
+		b.WriteString("?t=")
+		b.WriteString(strings.Join(tripParts, ","))
+		b.WriteString("&l=")
+		b.WriteString(in.Filter.Lang)
+		b.WriteString("&d=")
+		b.WriteString(dateStr)
+		b.WriteString("&sa=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsAdult))
+		b.WriteString("&sc=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsChild))
+		b.WriteString("&si=")
+		b.WriteString(strconv.Itoa(in.Filter.SeatsInfant))
+		b.WriteString("&a=")
+		b.WriteString(strconv.Itoa(in.Filter.AgentID))
+		if in.Filter.SearchURL != "" {
+			b.WriteString("&search_url=")
+			b.WriteString(in.Filter.SearchURL)
 		}
 		b.WriteString("&visitorId=")
 		b.WriteString(in.Filter.VisitorID)

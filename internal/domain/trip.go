@@ -17,7 +17,20 @@ type RawTrip struct {
 	ArrStationID   int    `db:"arr_station_id"`
 	SetID          *int   `db:"set_id"` // nil if not a connection
 
+	// Connection leg station pairs — populated by AssembleMultiLeg.
+	// Each entry is [fromStationID, toStationID] for a single leg.
+	// For direct trips this is nil; for connections has 2-3 entries.
+	ConnectionLegs []LegPair `db:"-"`
+
+	// Pack data — populated by AssembleMultiLeg from trip_pool4_set.
+	// PackID > 0 means this is a manual pack (PHP isPack() = true).
+	// HeadTripKey is the pack's master trip key (= set's trip_key).
+	PackID      int    `db:"-"`
+	HeadTripKey string `db:"-"`
+
 	// Station data
+	DepVehclassID   string `db:"dep_vehclass_id"`
+	ArrVehclassID   string `db:"arr_vehclass_id"`
 	DepTimezoneName string `db:"dep_timezone_name"`
 	ArrTimezoneName string `db:"arr_timezone_name"`
 	DepCountryID    string `db:"dep_country_id"`
@@ -84,6 +97,47 @@ type RawTrip struct {
 
 	// Round trip
 	RoundTripDiscountPct float64 `db:"round_trip_discount_pct"`
+}
+
+// LegPair stores the station pair and trip key for one leg of a connection.
+type LegPair struct {
+	TripKey      string
+	FromID       int
+	ToID         int
+	Godate       int64 // unix timestamp for date formatting
+}
+
+// PreFilterRecheckEntry holds minimal data from a raw trip needed to build
+// a recheck group. Collected from ALL trips before filtering (matching PHP's
+// originalCollection pattern in ChiefCook). This ensures recheck groups include
+// station pairs from trips that are later filtered out (hidden, meta, connection
+// legs whose assembly fails, etc.).
+type PreFilterRecheckEntry struct {
+	DepStationID    int
+	ArrStationID    int
+	IntegrationCode string
+	IntegrationID   int
+	ChunkKeyRaw     string // raw chunk_key from DB (integration.chunk_key)
+	VehclassID      string // for easybook train override in chunk key
+	Godate          int64  // for date field in chunk key
+	OperatorID      int    // for chunk key field resolution
+	ClassID         int    // for chunk key field resolution
+	OfficialID      string // for chunk key field resolution
+}
+
+// PendingPackRecheck holds data for generating /searchpm URLs for multi-day packs
+// that couldn't be assembled because the second leg is on a different date.
+// PHP handles these via PackAndConnectionSearch which fetches legs across dates.
+type PendingPackRecheck struct {
+	HeadTripKey string // pack's master trip key (set's trip_key)
+	ChunkKey    string // recheck chunk key from leg1's integration data
+	Legs        []PendingPackLeg
+}
+
+// PendingPackLeg holds per-leg data for a pending pack recheck entry.
+type PendingPackLeg struct {
+	TripKey string // individual leg trip key
+	Date    string // "YYYY-MM-DD" departure date
 }
 
 // TripPlain is a simplified trip reference used for round trip lookups.
@@ -244,4 +298,9 @@ type TravelOption struct {
 	// Internal fields for recheck grouping (not serialized to JSON)
 	IntegrationID int    // integration row ID
 	ChunkKey      string // recheck chunk key (integrationID-field1-field2-...)
+
+	// Pack recheck data (populated for manual packs from trip_pool4_set.pack_id)
+	IsPack      bool      // true when pack_id > 0 (PHP isPack())
+	HeadTripKey string    // pack's head trip key (set's trip_key)
+	PackLegs    []LegPair // per-leg data for pack recheck URL generation
 }

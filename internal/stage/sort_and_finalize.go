@@ -4,6 +4,9 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/12go/f4/internal/domain"
 )
@@ -17,11 +20,25 @@ type RecheckGroup struct {
 	ToStationIDs   []int
 }
 
+// PackRecheckEntry holds per-leg data for one BuyItem in a manual pack recheck.
+// PHP Rechecker generates: headTripKey tripKey date (space-separated).
+type PackRecheckEntry struct {
+	HeadTripKey string // pack's master trip key (set's trip_key)
+	TripKey     string // individual leg trip key
+	Date        string // "YYYY-MM-DD" departure date of the leg
+}
+
+// PackRecheckGroup collects entries for one /searchpm URL, grouped by chunk key.
+type PackRecheckGroup struct {
+	Entries []PackRecheckEntry
+}
+
 // FinalResults is the output of Stage 8.
 type FinalResults struct {
 	Trips               []domain.TripResult
-	RecheckTripKeys     []string       // flat trip keys for event emission
-	RecheckGroups       []RecheckGroup // per-ChunkKey groups for URL generation
+	RecheckTripKeys     []string            // flat trip keys for event emission
+	RecheckGroups       []RecheckGroup      // per-ChunkKey groups for URL generation (/searchr)
+	PackRecheckGroups   []PackRecheckGroup  // manual pack recheck groups (/searchpm)
 	PresentIntegrations []string
 	Operators           map[int]domain.Operator
 	Stations            map[int]domain.Station
@@ -63,7 +80,10 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		return out, nil
 	}
 
-	// Merge duplicate travel options by group key
+	// Merge duplicate travel options by group key.
+	// PHP TripResultApiV1Factory: when an existing trip is NOT bookable and a new
+	// travel option IS bookable, the trip-level data (segments, params, transfer_id)
+	// is replaced by the bookable option's data. This is the "winning option" logic.
 	grouped := make(map[string]*domain.TripResult, len(in.Trips))
 	var orderedKeys []string
 	for i := range in.Trips {
@@ -71,11 +91,27 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		key := trip.GroupKey
 
 		if existing, ok := grouped[key]; ok {
-			// Merge travel options
-			existing.TravelOptions = append(existing.TravelOptions, trip.TravelOptions...)
-			// Keep best rank score
-			if trip.RankScore > existing.RankScore {
-				existing.RankScore = trip.RankScore
+			existingBookable := tripHasBookableOption(existing)
+			newBookable := tripHasBookableOption(trip)
+
+			if !existingBookable && newBookable {
+				// Winning option: replace trip-level data with bookable option's data,
+				// but preserve ALL previously collected travel options.
+				// PHP also loses the reason here (creates new trip object from bookable raw trip).
+				prevOpts := existing.TravelOptions
+				*existing = *trip
+				existing.TravelOptions = append(prevOpts, trip.TravelOptions...)
+			} else {
+				// Normal merge: just append travel options
+				existing.TravelOptions = append(existing.TravelOptions, trip.TravelOptions...)
+				if trip.RankScore > existing.RankScore {
+					existing.RankScore = trip.RankScore
+				}
+				// PHP line 127: adopt reason from subsequent trip if not yet set.
+				// PHP uses "if ($rawTrip['reason_id'] && !$trip->params->reasonId)"
+				if existing.ParamsReason == "" && trip.ParamsReason != "" {
+					existing.ParamsReason = trip.ParamsReason
+				}
 			}
 		} else {
 			t := *trip
@@ -98,6 +134,43 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 	recheckGroupMap := make(map[string]*recheckGroupData)
 	var recheckGroupOrder []string // insertion order of ChunkKeys
 
+	// Pack recheck grouping (PHP manualPacks collection → /searchpm URLs).
+	// Grouped by chunk key like regular recheck, but entries contain per-leg
+	// trip keys and dates instead of station pairs.
+	type packRecheckGroupData struct {
+		entries    []PackRecheckEntry
+		entrySet  map[string]struct{} // dedup key: "headTripKey tripKey"
+	}
+	packRecheckGroupMap := make(map[string]*packRecheckGroupData)
+	var packRecheckGroupOrder []string
+
+	// PHP originalCollection pattern (Pass B): merge pre-filter recheck entries
+	// into the recheck groups. These entries come from ALL raw trips before
+	// filtering (including connections that failed to assemble, meta trips, etc.).
+	// PHP ChiefCook collects these BEFORE any filtering, then RecheckBuilder
+	// merges them in Pass B.
+	for _, entry := range in.PreFilterRecheckEntries {
+		chunkKey := buildPreFilterChunkKey(entry, in.ManualIntegrationID)
+		gd, ok := recheckGroupMap[chunkKey]
+		if !ok {
+			intID := entry.IntegrationID
+			if entry.IntegrationCode == "manual" && intID == 0 && in.ManualIntegrationID > 0 {
+				intID = in.ManualIntegrationID
+			}
+			gd = &recheckGroupData{
+				integrationID: intID,
+				pairSet:       make(map[[2]int]struct{}),
+			}
+			recheckGroupMap[chunkKey] = gd
+			recheckGroupOrder = append(recheckGroupOrder, chunkKey)
+		}
+		pair := [2]int{entry.DepStationID, entry.ArrStationID}
+		if _, exists := gd.pairSet[pair]; !exists {
+			gd.pairSet[pair] = struct{}{}
+			gd.stationPairs = append(gd.stationPairs, pair)
+		}
+	}
+
 	for _, key := range orderedKeys {
 		trip := grouped[key]
 
@@ -108,6 +181,26 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		// prepareMultiOptionTrip aggregates statistics; cookApiV1 aggregates params.
 		aggregateMultiOptionTrip(trip)
 
+		// For multi-option trips, reset params for re-aggregation matching PHP cookApiV1.
+		// PHP: params are aggregated from all options with valid price (line 409),
+		// BookingsLastMonth from filtered options only (line 443).
+		isMulti := len(trip.TravelOptions) > 1
+		if isMulti {
+			trip.ParamsBookable = 0
+			trip.ParamsIsBookable = 0
+			trip.BookingsLastMonth = 0
+			// PHP buildParams initialises min_price to Price{value:0, fxcode:…}.
+			// Reset to zero-value (not nil) so we match PHP when all options have Total=0.
+			fxCode := ""
+			for _, o := range trip.TravelOptions {
+				if o.Price.FXCode != "" {
+					fxCode = o.Price.FXCode
+					break
+				}
+			}
+			trip.ParamsMinPrice = &domain.PriceSimple{Value: 0, FXCode: fxCode}
+		}
+
 		// PHP ChiefCook.cookApiV1: splitToRecheck=true by default.
 		// Travel options without valid prices go to recheck only.
 		// Valid-price options only appear in main results if:
@@ -117,9 +210,50 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 			if opt.IntegrationCode != "" {
 				integrationSet[opt.IntegrationCode] = struct{}{}
 			}
+
+			// PHP cookApiV1 line 409: aggregate params from options with valid price > 0.
+			// PHP comparison: if (minPrice->value < 0.05 || minPrice->value > option->price->value)
+			if isMulti && opt.Price.IsValid && opt.Price.Total > 0 {
+				if trip.ParamsMinPrice == nil || trip.ParamsMinPrice.Value < 0.05 || opt.Price.Total < trip.ParamsMinPrice.Value {
+					trip.ParamsMinPrice = &domain.PriceSimple{Value: opt.Price.Total, FXCode: opt.Price.FXCode}
+				}
+				if opt.Bookable > 0 {
+					if opt.Bookable > trip.ParamsBookable {
+						trip.ParamsBookable = opt.Bookable
+					}
+					trip.ParamsIsBookable = 1
+				}
+			}
+
 			if !opt.Price.IsValid {
 				recheckKeySet[opt.TripKey] = struct{}{}
-				// Build recheck group by ChunkKey (matching PHP RecheckBuilder grouping)
+
+				// PHP RecheckBuilder.addToCollection: if trip.isPack() → manualPacks
+				if opt.IsPack && len(opt.PackLegs) > 0 {
+					pgd, ok := packRecheckGroupMap[opt.ChunkKey]
+					if !ok {
+						pgd = &packRecheckGroupData{
+							entrySet: make(map[string]struct{}),
+						}
+						packRecheckGroupMap[opt.ChunkKey] = pgd
+						packRecheckGroupOrder = append(packRecheckGroupOrder, opt.ChunkKey)
+					}
+					for _, leg := range opt.PackLegs {
+						dedupKey := opt.HeadTripKey + " " + leg.TripKey
+						if _, exists := pgd.entrySet[dedupKey]; exists {
+							continue
+						}
+						pgd.entrySet[dedupKey] = struct{}{}
+						pgd.entries = append(pgd.entries, PackRecheckEntry{
+							HeadTripKey: opt.HeadTripKey,
+							TripKey:     leg.TripKey,
+							Date:        formatGodateUnix(leg.Godate)[:10], // "YYYY-MM-DD"
+						})
+					}
+					continue
+				}
+
+				// Regular recheck: build group by ChunkKey (matching PHP RecheckBuilder)
 				gd, ok := recheckGroupMap[opt.ChunkKey]
 				if !ok {
 					gd = &recheckGroupData{
@@ -129,10 +263,12 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 					recheckGroupMap[opt.ChunkKey] = gd
 					recheckGroupOrder = append(recheckGroupOrder, opt.ChunkKey)
 				}
-				pair := [2]int{opt.FromStationID, opt.ToStationID}
-				if _, exists := gd.pairSet[pair]; !exists {
-					gd.pairSet[pair] = struct{}{}
-					gd.stationPairs = append(gd.stationPairs, pair)
+				for _, buy := range opt.Buy {
+					pair := [2]int{buy.FromID, buy.ToID}
+					if _, exists := gd.pairSet[pair]; !exists {
+						gd.pairSet[pair] = struct{}{}
+						gd.stationPairs = append(gd.stationPairs, pair)
+					}
 				}
 				continue
 			}
@@ -140,6 +276,12 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 			if !trip.ShowUnavailable && opt.Bookable <= 0 && !in.Filter.WithNonBookable {
 				continue
 			}
+
+			// PHP cookApiV1 line 443: BookingsLastMonth from filtered options only.
+			if isMulti && opt.BookingsLastMonth > trip.BookingsLastMonth {
+				trip.BookingsLastMonth = opt.BookingsLastMonth
+			}
+
 			validOpts = append(validOpts, opt)
 		}
 
@@ -186,6 +328,39 @@ func (s *SortAndFinalizeStage) Execute(ctx context.Context, in HydratedResults) 
 		}
 		out.RecheckGroups = append(out.RecheckGroups, g)
 	}
+	// Merge pending pack rechecks (multi-day packs that couldn't be assembled)
+	// into the pack recheck groups.
+	for _, pp := range in.PendingPackRechecks {
+		pgd, ok := packRecheckGroupMap[pp.ChunkKey]
+		if !ok {
+			pgd = &packRecheckGroupData{
+				entrySet: make(map[string]struct{}),
+			}
+			packRecheckGroupMap[pp.ChunkKey] = pgd
+			packRecheckGroupOrder = append(packRecheckGroupOrder, pp.ChunkKey)
+		}
+		for _, leg := range pp.Legs {
+			dedupKey := pp.HeadTripKey + " " + leg.TripKey
+			if _, exists := pgd.entrySet[dedupKey]; exists {
+				continue
+			}
+			pgd.entrySet[dedupKey] = struct{}{}
+			pgd.entries = append(pgd.entries, PackRecheckEntry{
+				HeadTripKey: pp.HeadTripKey,
+				TripKey:     leg.TripKey,
+				Date:        leg.Date,
+			})
+		}
+	}
+
+	// Build pack recheck groups
+	for _, chunkKey := range packRecheckGroupOrder {
+		pgd := packRecheckGroupMap[chunkKey]
+		out.PackRecheckGroups = append(out.PackRecheckGroups, PackRecheckGroup{
+			Entries: pgd.entries,
+		})
+	}
+
 	for code := range integrationSet {
 		out.PresentIntegrations = append(out.PresentIntegrations, code)
 	}
@@ -205,8 +380,9 @@ func aggregateMultiOptionTrip(trip *domain.TripResult) {
 	trip.ParamsMinRating = nil
 	trip.ScoreSorting = 0
 	trip.SalesSorting = 0
-	trip.BookingsLastMonth = 0
 	trip.IsBookable = false
+	// NOTE: BookingsLastMonth is NOT reset here — it's reset and re-aggregated
+	// in the Execute filtering loop from filtered options only (matching PHP cookApiV1 line 443).
 
 	var totalBookings30d, totalBookings30dSolo int
 	var paramsRatingCount int
@@ -234,10 +410,8 @@ func aggregateMultiOptionTrip(trip *domain.TripResult) {
 		if optSales > trip.SalesSorting {
 			trip.SalesSorting = optSales
 		}
-		// PHP addTripStatistics: bookingsLastMonth = max
-		if opt.BookingsLastMonth > trip.BookingsLastMonth {
-			trip.BookingsLastMonth = opt.BookingsLastMonth
-		}
+		// NOTE: BookingsLastMonth aggregation moved to Execute filtering loop
+		// (PHP cookApiV1 aggregates from filtered options only, not all options).
 		// PHP addTripStatistics: bookings30d += (sum)
 		totalBookings30d += opt.Bookings30d
 		totalBookings30dSolo += opt.Bookings30dSolo
@@ -263,6 +437,16 @@ func rankSalesFromBookings(bookings30d float64) float64 {
 	return 0
 }
 
+// tripHasBookableOption checks if any travel option in the trip is bookable.
+func tripHasBookableOption(trip *domain.TripResult) bool {
+	for _, o := range trip.TravelOptions {
+		if o.IsBookable > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func dedupTravelOptions(opts []domain.TravelOption) []domain.TravelOption {
 	seen := make(map[string]struct{}, len(opts))
 	result := make([]domain.TravelOption, 0, len(opts))
@@ -274,4 +458,56 @@ func dedupTravelOptions(opts []domain.TravelOption) []domain.TravelOption {
 		result = append(result, o)
 	}
 	return result
+}
+
+// buildPreFilterChunkKey computes the chunk key for a PreFilterRecheckEntry,
+// matching the same logic as buildRecheckChunkKey in hydrate_results.go.
+func buildPreFilterChunkKey(entry domain.PreFilterRecheckEntry, manualIntegrationID int) string {
+	integrationID := entry.IntegrationID
+	if entry.IntegrationCode == "manual" && integrationID == 0 && manualIntegrationID > 0 {
+		integrationID = manualIntegrationID
+	}
+
+	chunkKey := entry.ChunkKeyRaw
+	if entry.IntegrationCode == "manual" {
+		chunkKey = "date"
+	} else if entry.VehclassID == "train" && strings.Contains(entry.IntegrationCode, "easybook") {
+		chunkKey = "vehclass_id,dep_station_id,arr_station_id"
+	}
+
+	fields := strings.Split(chunkKey, ",")
+	values := []string{strconv.Itoa(integrationID)}
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if field == "date" {
+			loc, _ := time.LoadLocation("Asia/Bangkok")
+			t := time.Unix(entry.Godate, 0).In(loc)
+			values = append(values, t.Format("2006-01-02"))
+			continue
+		}
+		values = append(values, getPreFilterField(entry, field))
+	}
+	return strings.Join(values, "-")
+}
+
+func getPreFilterField(entry domain.PreFilterRecheckEntry, field string) string {
+	switch field {
+	case "vehclass_id":
+		return entry.VehclassID
+	case "dep_station_id":
+		return strconv.Itoa(entry.DepStationID)
+	case "arr_station_id":
+		return strconv.Itoa(entry.ArrStationID)
+	case "operator_id":
+		return strconv.Itoa(entry.OperatorID)
+	case "class_id":
+		return strconv.Itoa(entry.ClassID)
+	case "official_id":
+		return entry.OfficialID
+	default:
+		return "?"
+	}
 }

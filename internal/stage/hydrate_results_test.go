@@ -218,6 +218,8 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 		OperatorID:         16779,
 		ClassID:            12,
 		VehclassID:         "train",
+		DepVehclassID:      "train",
+		ArrVehclassID:      "train",
 		OfficialID:         "9",
 		DepStationID:       3,
 		ArrStationID:       4,
@@ -344,7 +346,7 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 	if opt.TicketType != "default" {
 		t.Errorf("opt.TicketType = %q, want %q", opt.TicketType, "default")
 	}
-	if opt.CancellationMsg != "No refunds, no cancelation" {
+	if opt.CancellationMsg != "No refunds, no cancellation" {
 		t.Errorf("opt.CancellationMsg = %q", opt.CancellationMsg)
 	}
 	if opt.IsBookable != 1 {

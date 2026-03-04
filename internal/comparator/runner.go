@@ -130,6 +130,17 @@ func (r *Runner) fetch(rawURL string, headers map[string]string) FetchResult {
 	}
 }
 
+// FetchEndpoint fetches a single test case from the named endpoint ("legacy" or "new").
+func (r *Runner) FetchEndpoint(tc TestCase, endpoint string) FetchResult {
+	ep, ok := r.cfg.Endpoints[endpoint]
+	if !ok {
+		return FetchResult{Err: fmt.Errorf("unknown endpoint %q", endpoint)}
+	}
+	u := buildURL(ep, tc)
+	fmt.Printf("  %s: %s\n", endpoint, u)
+	return r.fetch(u, ep.Headers)
+}
+
 func indexOf(s string, c byte) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c {

@@ -1,4 +1,4 @@
-.PHONY: build run test test-v test-fresh vet lint clean docker compare compare-clean
+.PHONY: build run test test-v test-fresh vet lint clean docker compare compare-clean kill-port
 
 APP_NAME := f4
 BUILD_DIR := ./cmd/server
@@ -36,5 +36,15 @@ docker-run: docker
 compare:
 	go run ./cmd/comparator run
 
+compare-golive:
+	go run ./cmd/comparator golive
+
+compare-rediff:
+	go run ./cmd/comparator rediff
+
 compare-clean:
 	go run ./cmd/comparator clean
+
+kill-port:
+	go run scripts/killport.go
+

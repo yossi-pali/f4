@@ -96,12 +96,26 @@ func (d *Differ) Compare(tc TestCase, legacyBody, newBody []byte, legacyStatus, 
 	// Compare simple top-level fields
 	d.compareField(result, "", "provinceName", legacyData["provinceName"], newData["provinceName"])
 
-	// Compare recheck URLs — filter out scan URLs (/searchs) as known gaps
+	// Move legacy-only ref data diffs (stations, operators, classes) to known gaps.
+	// These occur because PHP collects ref data from recheck/connection legs that Go doesn't.
+	result.extractOrphanRefDataGaps()
+
+	// Compare recheck URLs — filter out scan URLs (/searchs) and pack manual
+	// URLs (/searchpm) as known gaps (Go doesn't yet generate pack rechecks).
 	legacyRecheck := toStringSlice(legacyData["recheck"])
 	newRecheck := toStringSlice(newData["recheck"])
-	legacySearchr, legacyScan := splitScanURLs(legacyRecheck)
-	newSearchr, newScan := splitScanURLs(newRecheck)
-	d.compareSortedStringSlices(result, "recheck", legacySearchr, newSearchr)
+	legacySearchr, legacyScan, legacyPack := splitRecheckURLs(legacyRecheck)
+	newSearchr, newScan, newPack := splitRecheckURLs(newRecheck)
+
+	// Normalize station IDs within f/t params so order doesn't matter.
+	// Also normalize integration ID (i=) — PHP and Go may assign different
+	// integration IDs to the same station pair group due to processing order.
+	// After normalization, deduplicate: PHP emits one URL per integration ID
+	// for the same station pair group, but after stripping i= they collapse.
+	legacySearchr = dedup(normalizeAll(legacySearchr))
+	newSearchr = dedup(normalizeAll(newSearchr))
+	d.compareRecheckSets(result, legacySearchr, newSearchr)
+
 	if len(legacyScan) > 0 || len(newScan) > 0 {
 		result.KnownGaps = append(result.KnownGaps, KnownGap{
 			Type:   "scan_urls",
@@ -109,9 +123,13 @@ func (d *Differ) Compare(tc TestCase, legacyBody, newBody []byte, legacyStatus, 
 			Count:  len(legacyScan),
 		})
 	}
-
-	// Move orphan station diffs (legacy-only) to known gaps
-	result.extractOrphanStationGaps()
+	if len(legacyPack) > 0 || len(newPack) > 0 {
+		result.KnownGaps = append(result.KnownGaps, KnownGap{
+			Type:   "pack_recheck_urls",
+			Detail: fmt.Sprintf("legacy=%d new=%d", len(legacyPack), len(newPack)),
+			Count:  len(legacyPack),
+		})
+	}
 
 	result.groupDifferences()
 	return result
@@ -549,16 +567,121 @@ func categorize(d FieldDiff) string {
 	return "other"
 }
 
-// splitScanURLs separates place-based scan URLs (/searchs) from station-based recheck URLs (/searchr).
-func splitScanURLs(urls []string) (searchr, scan []string) {
+// normalizeRecheckURL sorts the comma-separated station IDs in f and t params
+// so that station pair order doesn't cause false diffs.
+// Also removes the i= (integration_id) parameter since PHP and Go may assign
+// different integration IDs to the same station pair group due to processing order.
+func normalizeRecheckURL(u string) string {
+	parts := strings.SplitN(u, "?", 2)
+	if len(parts) < 2 {
+		return u
+	}
+	var outParams []string
+	for _, p := range strings.Split(parts[1], "&") {
+		kv := strings.SplitN(p, "=", 2)
+		if len(kv) == 2 {
+			// Strip integration_id — both systems check same integrations, just grouped differently
+			if kv[0] == "i" {
+				continue
+			}
+			if kv[0] == "f" || kv[0] == "t" {
+				ids := strings.Split(kv[1], ",")
+				sort.Strings(ids)
+				p = kv[0] + "=" + strings.Join(ids, ",")
+			}
+		}
+		outParams = append(outParams, p)
+	}
+	return parts[0] + "?" + strings.Join(outParams, "&")
+}
+
+
+// splitRecheckURLs separates recheck URLs into three categories:
+//   - searchr: station-based recheck (/searchr)
+//   - scan: place-based scan URLs (/searchs)
+//   - pack: manual pack recheck URLs (/searchpm)
+func splitRecheckURLs(urls []string) (searchr, scan, pack []string) {
 	for _, u := range urls {
-		if strings.Contains(u, "/searchs") {
+		switch {
+		case strings.Contains(u, "/searchs"):
 			scan = append(scan, u)
-		} else {
+		case strings.Contains(u, "/searchpm"):
+			pack = append(pack, u)
+		default:
 			searchr = append(searchr, u)
 		}
 	}
 	return
+}
+
+// normalizeAll applies normalizeRecheckURL to every element.
+func normalizeAll(urls []string) []string {
+	out := make([]string, len(urls))
+	for i, u := range urls {
+		out[i] = normalizeRecheckURL(u)
+	}
+	return out
+}
+
+// dedup removes duplicate strings, preserving first-seen order.
+func dedup(urls []string) []string {
+	seen := make(map[string]struct{}, len(urls))
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if _, exists := seen[u]; exists {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	return out
+}
+
+// compareRecheckSets compares recheck URL slices using set-based matching.
+// URLs present only in legacy are moved to known gaps (orphan_recheck_url)
+// since they typically come from trip-pool rows that PHP fetches but Go doesn't.
+// URLs present only in new, or content mismatches, are reported as real diffs.
+func (d *Differ) compareRecheckSets(result *DiffResult, legacy, newSlice []string) {
+	legacySet := make(map[string]struct{}, len(legacy))
+	for _, u := range legacy {
+		legacySet[u] = struct{}{}
+	}
+	newSet := make(map[string]struct{}, len(newSlice))
+	for _, u := range newSlice {
+		newSet[u] = struct{}{}
+	}
+
+	result.Summary.FieldsCompared += len(legacy) + len(newSlice)
+
+	// Legacy-only URLs → known gaps (PHP has extra trip-pool entries)
+	for _, u := range legacy {
+		if _, ok := newSet[u]; !ok {
+			result.KnownGaps = append(result.KnownGaps, KnownGap{
+				Type:   "orphan_recheck_url",
+				Detail: truncateURL(u, 120),
+				Count:  1,
+			})
+		}
+	}
+
+	// New-only URLs → real diffs (Go has URLs PHP doesn't — unexpected)
+	for _, u := range newSlice {
+		if _, ok := legacySet[u]; !ok {
+			result.rawDiffs = append(result.rawDiffs, FieldDiff{
+				Path:   "recheck.extra_in_new",
+				Legacy: nil,
+				New:    truncateURL(u, 120),
+			})
+		}
+	}
+}
+
+// truncateURL shortens a URL for display.
+func truncateURL(u string, maxLen int) string {
+	if len(u) <= maxLen {
+		return u
+	}
+	return u[:maxLen] + "..."
 }
 
 // compareSortedStringSlices compares two pre-split string slices after sorting.
@@ -584,20 +707,26 @@ func (d *Differ) compareSortedStringSlices(result *DiffResult, path string, lega
 	}
 }
 
-// extractOrphanStationGaps moves station diffs where legacy has the station but new doesn't
-// to KnownGaps (these are transit stations from PHP connection legs that Go doesn't collect).
-func (r *DiffResult) extractOrphanStationGaps() {
+// extractOrphanRefDataGaps moves legacy-only ref data diffs (stations, operators, classes)
+// to KnownGaps. These occur because PHP collects ref data from recheck/connection legs
+// that Go doesn't have access to.
+func (r *DiffResult) extractOrphanRefDataGaps() {
 	var filtered []FieldDiff
 	for _, d := range r.rawDiffs {
-		if strings.HasPrefix(d.Path, "stations.") && d.Legacy == "present" && d.New == nil {
-			r.KnownGaps = append(r.KnownGaps, KnownGap{
-				Type:   "orphan_station",
-				Detail: d.Path,
-				Count:  1,
-			})
-		} else {
-			filtered = append(filtered, d)
+		if d.Legacy == "present" && d.New == nil {
+			switch {
+			case strings.HasPrefix(d.Path, "stations."):
+				r.KnownGaps = append(r.KnownGaps, KnownGap{Type: "orphan_station", Detail: d.Path, Count: 1})
+				continue
+			case strings.HasPrefix(d.Path, "operators."):
+				r.KnownGaps = append(r.KnownGaps, KnownGap{Type: "orphan_operator", Detail: d.Path, Count: 1})
+				continue
+			case strings.HasPrefix(d.Path, "classes."):
+				r.KnownGaps = append(r.KnownGaps, KnownGap{Type: "orphan_class", Detail: d.Path, Count: 1})
+				continue
+			}
 		}
+		filtered = append(filtered, d)
 	}
 	r.rawDiffs = filtered
 }

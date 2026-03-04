@@ -32,7 +32,7 @@ func (s *Storage) SaveRaw(runDir string, tc TestCase, endpoint string, data []by
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	filename := fmt.Sprintf("%s_%s-%s.json", slugify(tc.Scenario.Name), tc.Date, endpoint)
+	filename := fmt.Sprintf("%s_%s-%s.json", Slugify(tc.Scenario.Name), tc.Date, endpoint)
 	return os.WriteFile(filepath.Join(dir, filename), prettyJSON(data), 0o644)
 }
 
@@ -46,7 +46,7 @@ func (s *Storage) SaveDiff(runDir string, tc TestCase, diff *DiffResult) error {
 	if err != nil {
 		return err
 	}
-	filename := fmt.Sprintf("%s_%s.json", slugify(tc.Scenario.Name), tc.Date)
+	filename := fmt.Sprintf("%s_%s.json", Slugify(tc.Scenario.Name), tc.Date)
 	return os.WriteFile(filepath.Join(dir, filename), data, 0o644)
 }
 
@@ -134,7 +134,9 @@ func (s *Storage) Clean(keep int, rawOnly, diffOnly bool) (int, error) {
 var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
 
 // slugify converts a name to a filesystem-safe slug.
-func slugify(name string) string {
+// Slugify converts a scenario name to a filesystem-safe slug.
+// "Bangkok to Chiang Mai" → "bangkok-to-chiang-mai"
+func Slugify(name string) string {
 	s := strings.ToLower(strings.TrimSpace(name))
 	s = nonAlphaNum.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
