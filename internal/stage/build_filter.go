@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/feature"
 	"github.com/12go/f4/internal/pipeline"
@@ -97,14 +99,35 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 		filter.RecheckLevel = domain.RecheckBySettings
 	}
 
-	// Apply security restrictions
+	// Apply security + white-label restrictions in parallel
 	pc := pipeline.FromContext(ctx)
 	const stage = "build_filter"
-	t := pc.StartTimer(stage, "data_sec")
-	sec, err := s.dataSecRepo.GetRestrictions(ctx, in.Agent.AgentID)
-	if err != nil {
+
+	var sec repository.SecurityRestrictions
+	var wlCfg repository.WhiteLabelConfig
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "data_sec")
+		var err error
+		sec, err = s.dataSecRepo.GetRestrictions(gctx, in.Agent.AgentID)
+		t.Stop()
+		return err
+	})
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "white_label")
+		var err error
+		wlCfg, err = s.whiteLabelRepo.GetConfig(gctx, in.Agent.AgentID)
+		t.Stop()
+		return err
+	})
+
+	if err := g.Wait(); err != nil {
 		return filter, err
 	}
+
 	filter.OperatorIDs = sec.OperatorIDs
 	filter.SellerIDs = sec.SellerIDs
 	filter.CountryIDs = sec.CountryIDs
@@ -116,22 +139,12 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 	filter.ExcludeVehclassIDs = sec.ExcludeVehclassIDs
 	filter.ExcludeClassIDs = sec.ExcludeClassIDs
 
-	t.Stop()
-
-	// Apply white-label restrictions
-	t = pc.StartTimer(stage, "white_label")
-	wlCfg, err := s.whiteLabelRepo.GetConfig(ctx, in.Agent.AgentID)
-	if err != nil {
-		return filter, err
-	}
 	if len(wlCfg.OperatorIDs) > 0 {
 		filter.OperatorIDs = intersectInts(filter.OperatorIDs, wlCfg.OperatorIDs)
 		if len(filter.OperatorIDs) == 0 && len(wlCfg.OperatorIDs) > 0 {
 			filter.IsNotPossible = true
 		}
 	}
-
-	t.Stop()
 
 	// Vehclass filter from query param
 	if p.VehclassID != "" {

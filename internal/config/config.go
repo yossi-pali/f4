@@ -117,6 +117,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Viper Unmarshal doesn't resolve BindEnv for nested structs — read explicitly.
+	cfg.RefCache.EnableOperators = v.GetBool("ref_cache.enable_operators")
+	cfg.RefCache.EnableStations = v.GetBool("ref_cache.enable_stations")
+	cfg.RefCache.EnableClasses = v.GetBool("ref_cache.enable_classes")
+	cfg.RefCache.EnableReasons = v.GetBool("ref_cache.enable_reasons")
+	cfg.RefCache.EnableIntegration = v.GetBool("ref_cache.enable_integration")
+	cfg.RefCache.RefreshTTL = v.GetDuration("ref_cache.refresh_ttl")
+
 	// Load feature flags from env
 	cfg.Features = map[string]bool{
 		"round_trips":  v.GetBool("FEATURE_ROUND_TRIPS"),

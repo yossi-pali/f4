@@ -95,3 +95,53 @@
 - **Pre-state:** Sequential loop over day offsets, each calling `FindByTripKeys`.
 - **Post-state:** `errgroup.Go` for each day offset in parallel.
 - **Why:** Multi-day connections with 2-3 day offsets blocked on sequential DB calls. Now runs in parallel.
+
+## Phase 2 Fix: RefDataCache Config + Ratings + Station Slug
+
+**Files:** `internal/config/config.go`, `internal/refcache/refcache.go`
+
+- **What:**
+  1. Fixed Viper `BindEnv` not propagating to nested struct via `Unmarshal` — added explicit `v.GetBool()` reads for all `ref_cache.*` keys.
+  2. Fixed `loadAllRatings` query — was referencing non-existent `rating` column. Now uses same JSON_EXTRACT formula as `OperatorRepo.FindOperatorRatings`.
+  3. Fixed cached stations missing `StationSlug` — added `slugifyName(st.StationName)` in `loadAllStations`.
+  4. Increased refresh timeout from 30s to 2m (263K stations from remote DB needs more time).
+- **Why:** Cache was silently disabled due to Viper bug; ratings query failed; station slugs were empty causing diffs.
+- **Verified:** 15/15 PASS comparing master baseline vs perf with all caches enabled.
+
+## Phase 6: Parallel Resolve Places
+
+**File:** `internal/stage/resolve_places.go`
+
+- **What:** Changed 4 sequential DB calls (`ResolvePlaceToStationIDs` × 2, `GetPlaceData` × 2) to parallel using `errgroup`.
+- **Pre-state:** Sequential: from_resolve → to_resolve → from_place_data → to_place_data (~1,200ms total = 4 × 300ms).
+- **Post-state:** All 4 run in parallel (~290ms total = 1 round-trip).
+- **Why:** Each call is independent (different place IDs). With ~280ms per DB round-trip to remote MySQL, this saves ~900ms.
+- **Impact:** Stage 1 dropped from **1,256ms → 291ms**.
+
+## Phase 6: Parallel Build Filter
+
+**File:** `internal/stage/build_filter.go`
+
+- **What:** Changed `data_sec` and `white_label` queries from sequential to parallel using `errgroup`.
+- **Pre-state:** Sequential: data_sec → white_label (~585ms, though data_sec is fast for agentID=0).
+- **Post-state:** Both run in parallel. White-label result is applied after both complete.
+- **Why:** Both lookups use only `agentID` — fully independent.
+- **Impact:** Minimal for default agent (data_sec ~0ms), but saves ~280ms for authenticated agents.
+
+## Performance Comparison: Master vs Perf Branch
+
+**Comparison date:** 2026-03-04 | **15/15 PASS, 0 diffs**
+
+| Route | Master (baseline) | Perf (optimized) | Saved |
+|-------|------------------|-----------------|-------|
+| Bangkok→Chiang Mai | 6.2-6.7s | 5.2-5.4s | **~1.0s** |
+| Chiang Mai→Bangkok | 6.0-6.4s | 5.1-5.2s | **~1.0s** |
+| Surat Thani→Koh Phangan | 4.8-5.0s | 3.8-3.9s | **~1.0s** |
+| Surat Thani→Chiang Mai | 5.5-5.6s | 4.5s | **~1.0s** |
+| Bangkok→Phuket | 6.0-6.2s | 5.1-5.3s | **~1.0s** |
+
+**Remaining hotspots** (Bangkok→Chiang Mai, warm):
+- `assemble_multi_leg.find_sets`: 1,200ms — largest single query
+- `collect_ref_data.images`: 900ms — gates the parallel Stage 6 group
+- `query_trips.sql_execute`: 950ms — main trip pool query
+- `sort_and_finalize.province_lookup`: 280ms — single DB round-trip

@@ -79,7 +79,7 @@ func (c *RefDataCache) backgroundRefresh() {
 }
 
 func (c *RefDataCache) refresh(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	if c.cfg.EnableOperators {
@@ -268,12 +268,23 @@ func (c *RefDataCache) loadAllOperators(ctx context.Context) (map[int]domain.Ope
 }
 
 func (c *RefDataCache) loadAllRatings(ctx context.Context) (map[int]repository.OperatorRating, error) {
+	c1 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll1')), '0') AS DECIMAL(20,4))"
+	c2 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll2')), '0') AS DECIMAL(20,4))"
+	c3 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll3')), '0') AS DECIMAL(20,4))"
+	c4 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll4')), '0') AS DECIMAL(20,4))"
+	c5 := "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingAll5')), '0') AS DECIMAL(20,4))"
+
+	weighted := "(" + c1 + "*1 + " + c2 + "*2 + " + c3 + "*3 + " + c4 + "*4 + " + c5 + "*5)"
+	total := "(" + c1 + " + " + c2 + " + " + c3 + " + " + c4 + " + " + c5 + ")"
+
+	query := `SELECT o.operator_id,
+		       COALESCE(ROUND(` + weighted + ` / NULLIF(` + total + `, 0), 2), 0) AS rating,
+		       CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.data, '$.ratingsCount')), '0') AS UNSIGNED) AS ratings_count
+		FROM operator_extra o
+		WHERE o.extra_type = 'rating'`
+
 	var rows []repository.OperatorRating
-	err := c.db.SelectContext(ctx, &rows, `
-		SELECT operator_id, COALESCE(rating, 0) AS rating, COALESCE(ratings_count, 0) AS ratings_count
-		FROM operator_extra
-		WHERE rating > 0`)
-	if err != nil {
+	if err := c.db.SelectContext(ctx, &rows, query); err != nil {
 		return nil, err
 	}
 	result := make(map[int]repository.OperatorRating, len(rows))
@@ -307,6 +318,7 @@ func (c *RefDataCache) loadAllStations(ctx context.Context) (map[int]domain.Stat
 	result := make(map[int]domain.Station, len(rows))
 	for _, r := range rows {
 		st := r.Station
+		st.StationSlug = slugifyName(st.StationName)
 		code := ""
 		if st.StationCode != nil {
 			code = *st.StationCode

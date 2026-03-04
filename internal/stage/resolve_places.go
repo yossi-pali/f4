@@ -4,6 +4,8 @@ import (
 	"context"
 	"math"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
@@ -58,47 +60,64 @@ func (s *ResolvePlacesStage) Execute(ctx context.Context, in ResolvePlacesInput)
 	pc := pipeline.FromContext(ctx)
 	const stage = "resolve_places"
 
-	// Resolve from place
-	t := pc.StartTimer(stage, "from_resolve")
-	fromIDs, err := s.stationRepo.ResolvePlaceToStationIDs(ctx, in.FromPlaceID)
-	t.Stop()
-	if err != nil {
+	// Run all 4 DB calls in parallel: from_resolve, to_resolve, from_place, to_place
+	g, gctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "from_resolve")
+		ids, err := s.stationRepo.ResolvePlaceToStationIDs(gctx, in.FromPlaceID)
+		t.Stop()
+		if err != nil {
+			return err
+		}
+		out.FromStationIDs = ids
+		return nil
+	})
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "to_resolve")
+		ids, err := s.stationRepo.ResolvePlaceToStationIDs(gctx, in.ToPlaceID)
+		t.Stop()
+		if err != nil {
+			return err
+		}
+		out.ToStationIDs = ids
+		return nil
+	})
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "from_place_data")
+		place, err := s.stationRepo.GetPlaceData(gctx, in.FromPlaceID)
+		t.Stop()
+		if err != nil {
+			return err
+		}
+		out.FromPlace = place
+		return nil
+	})
+
+	g.Go(func() error {
+		t := pc.StartTimer(stage, "to_place_data")
+		place, err := s.stationRepo.GetPlaceData(gctx, in.ToPlaceID)
+		t.Stop()
+		if err != nil {
+			return err
+		}
+		out.ToPlace = place
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
 		return out, err
 	}
-	if len(fromIDs) == 0 {
+
+	if len(out.FromStationIDs) == 0 || len(out.ToStationIDs) == 0 {
 		out.IsNotPossible = true
 		return out, nil
 	}
-	out.FromStationIDs = fromIDs
-
-	// Resolve to place
-	t = pc.StartTimer(stage, "to_resolve")
-	toIDs, err := s.stationRepo.ResolvePlaceToStationIDs(ctx, in.ToPlaceID)
-	t.Stop()
-	if err != nil {
-		return out, err
-	}
-	if len(toIDs) == 0 {
-		out.IsNotPossible = true
-		return out, nil
-	}
-	out.ToStationIDs = toIDs
-
-	// Load place data for from and to
-	fromPlace, err := s.stationRepo.GetPlaceData(ctx, in.FromPlaceID)
-	if err != nil {
-		return out, err
-	}
-	out.FromPlace = fromPlace
-
-	toPlace, err := s.stationRepo.GetPlaceData(ctx, in.ToPlaceID)
-	if err != nil {
-		return out, err
-	}
-	out.ToPlace = toPlace
 
 	// Calculate distance between places
-	out.Distance = haversineDistance(fromPlace.Lat, fromPlace.Lng, toPlace.Lat, toPlace.Lng)
+	out.Distance = haversineDistance(out.FromPlace.Lat, out.FromPlace.Lng, out.ToPlace.Lat, out.ToPlace.Lng)
 
 	return out, nil
 }
