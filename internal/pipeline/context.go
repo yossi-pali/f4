@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/12go/f4/internal/domain"
 )
 
 type ctxKey struct{}
@@ -14,6 +16,12 @@ type PipelineContext struct {
 	RequestID  string
 	mu         sync.Mutex
 	stageTimes map[string]time.Duration
+
+	// Business data: written once by an early stage, read by later stages.
+	// No mutex needed — each field is written once and read only by later sequential stages.
+	filter                  *domain.SearchFilter
+	preFilterRecheckEntries []domain.PreFilterRecheckEntry
+	pendingPackRechecks     []domain.PendingPackRecheck
 }
 
 // NewPipelineContext creates a new pipeline context.
@@ -79,6 +87,60 @@ func (pc *PipelineContext) StageTimes() map[string]time.Duration {
 		out[k] = v
 	}
 	return out
+}
+
+// SetFilter stores the search filter (called by Stage 2).
+// Safe to call on nil receiver (no-op).
+func (pc *PipelineContext) SetFilter(f domain.SearchFilter) {
+	if pc == nil {
+		return
+	}
+	pc.filter = &f
+}
+
+// Filter returns the search filter set by Stage 2.
+// Safe to call on nil receiver (returns zero value).
+func (pc *PipelineContext) Filter() domain.SearchFilter {
+	if pc == nil || pc.filter == nil {
+		return domain.SearchFilter{}
+	}
+	return *pc.filter
+}
+
+// SetPreFilterRecheckEntries stores recheck entries collected before filtering (called by Stage 4).
+// Safe to call on nil receiver (no-op).
+func (pc *PipelineContext) SetPreFilterRecheckEntries(entries []domain.PreFilterRecheckEntry) {
+	if pc == nil {
+		return
+	}
+	pc.preFilterRecheckEntries = entries
+}
+
+// PreFilterRecheckEntries returns recheck entries collected before filtering.
+// Safe to call on nil receiver (returns nil).
+func (pc *PipelineContext) PreFilterRecheckEntries() []domain.PreFilterRecheckEntry {
+	if pc == nil {
+		return nil
+	}
+	return pc.preFilterRecheckEntries
+}
+
+// SetPendingPackRechecks stores pending pack rechecks (called after Stage 5a merge).
+// Safe to call on nil receiver (no-op).
+func (pc *PipelineContext) SetPendingPackRechecks(packs []domain.PendingPackRecheck) {
+	if pc == nil {
+		return
+	}
+	pc.pendingPackRechecks = packs
+}
+
+// PendingPackRechecks returns pending pack rechecks from Stage 5a.
+// Safe to call on nil receiver (returns nil).
+func (pc *PipelineContext) PendingPackRechecks() []domain.PendingPackRecheck {
+	if pc == nil {
+		return nil
+	}
+	return pc.pendingPackRechecks
 }
 
 // WithPipelineContext attaches pipeline context to a context.Context.

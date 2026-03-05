@@ -20,18 +20,19 @@ type SearchPipelineInput struct {
 	Agent        domain.AgentContext
 }
 
-// SearchPipeline orchestrates all 9 stages.
+// SearchPipeline orchestrates all stages.
 type SearchPipeline struct {
-	stage1 *ResolvePlacesStage
-	stage2 *BuildFilterStage
-	stage3 *QueryTripsStage
-	stage4 *FilterRawTripsStage
+	stage1  *ResolvePlacesStage
+	stage2  *BuildFilterStage
+	stage3  *QueryTripsStage
+	stage4  *FilterRawTripsStage
 	stage5a *AssembleMultiLegStage
 	stage5b *EnrichRoundTripsStage
-	stage6 *CollectRefDataStage
-	stage7 *HydrateResultsStage
-	stage8 *SortAndFinalizeStage
-	stage9 *SerializeResponseStage
+	stage6  *CollectRefDataStage
+	stage7  *HydrateResultsStage
+	stage8a *MergeAndFilterStage
+	stage8b *SortAndFinalizeStage
+	stage9  *SerializeResponseStage
 }
 
 func NewSearchPipeline(
@@ -43,13 +44,14 @@ func NewSearchPipeline(
 	stage5b *EnrichRoundTripsStage,
 	stage6 *CollectRefDataStage,
 	stage7 *HydrateResultsStage,
-	stage8 *SortAndFinalizeStage,
+	stage8a *MergeAndFilterStage,
+	stage8b *SortAndFinalizeStage,
 	stage9 *SerializeResponseStage,
 ) *SearchPipeline {
 	return &SearchPipeline{
 		stage1: stage1, stage2: stage2, stage3: stage3, stage4: stage4,
 		stage5a: stage5a, stage5b: stage5b,
-		stage6: stage6, stage7: stage7, stage8: stage8, stage9: stage9,
+		stage6: stage6, stage7: stage7, stage8a: stage8a, stage8b: stage8b, stage9: stage9,
 	}
 }
 
@@ -96,22 +98,20 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 		DirectTrips:             filtered.DirectTrips,
 		ConnectionIDs:           filtered.ConnectionIDs,
 		ConnectionCompositeRows: filtered.ConnectionCompositeRows,
-		Filter:                  filtered.Filter,
 		SearchParams: repository.SearchParams{
-			GodateString: filtered.Filter.Date.Format("2006-01-02"),
-			SeatsAdult:   filtered.Filter.SeatsAdult,
-			SeatsChild:   filtered.Filter.SeatsChild,
-			SeatsInfant:  filtered.Filter.SeatsInfant,
-			AgentID:      filtered.Filter.AgentID,
-			Lang:         filtered.Filter.Lang,
-			FXCode:       filtered.Filter.FXCode,
-			RecheckLevel: filtered.Filter.RecheckLevel,
-			PriceMode:    filtered.Filter.PriceMode,
+			GodateString: filter.Date.Format("2006-01-02"),
+			SeatsAdult:   filter.SeatsAdult,
+			SeatsChild:   filter.SeatsChild,
+			SeatsInfant:  filter.SeatsInfant,
+			AgentID:      filter.AgentID,
+			Lang:         filter.Lang,
+			FXCode:       filter.FXCode,
+			RecheckLevel: filter.RecheckLevel,
+			PriceMode:    filter.PriceMode,
 		},
 	}
 	roundTripInput := EnrichRoundTripsInput{
 		DirectTrips: filtered.DirectTrips,
-		Filter:      filtered.Filter,
 	}
 
 	merged, err := pipeline.RunParallelMerge(
@@ -123,16 +123,16 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 		&enrichRoundTripsAdapter{stage: p.stage5b, input: roundTripInput},
 		// Merge function
 		func(ml MultiLegTrips, rt RoundTripEnrichedTrips) CollectRefDataInput {
+			// Store PendingPackRechecks on PipelineContext for Stage 8
+			pc.SetPendingPackRechecks(ml.PendingPackRechecks)
+
 			all := make([]domain.RawTrip, 0, len(rt.Trips)+len(ml.Connections)+len(ml.Autopacks))
 			all = append(all, rt.Trips...)
 			all = append(all, ml.Connections...)
 			all = append(all, ml.Autopacks...)
 			return CollectRefDataInput{
-				AllTrips:                all,
-				AllStationIDs:           filtered.AllStationIDs,
-				PreFilterRecheckEntries: filtered.PreFilterRecheckEntries,
-				PendingPackRechecks:     ml.PendingPackRechecks,
-				Filter:                  filtered.Filter,
+				AllTrips:      all,
+				AllStationIDs: filtered.AllStationIDs,
 			}
 		},
 	)
@@ -152,8 +152,14 @@ func (p *SearchPipeline) Execute(ctx context.Context, in SearchPipelineInput) (S
 		return SearchResponse{}, err
 	}
 
-	// Stage 8: Sort and finalize
-	final, err := pipeline.Run(ctx, p.stage8, hydrated)
+	// Stage 8a: Merge and filter
+	merged8, err := pipeline.Run(ctx, p.stage8a, hydrated)
+	if err != nil {
+		return SearchResponse{}, err
+	}
+
+	// Stage 8b: Sort
+	final, err := pipeline.Run(ctx, p.stage8b, merged8)
 	if err != nil {
 		return SearchResponse{}, err
 	}

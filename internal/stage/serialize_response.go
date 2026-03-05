@@ -54,11 +54,12 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 
 	// Build recheck URLs (one per integration chunk group, matching PHP Rechecker)
 	pc := pipeline.FromContext(ctx)
+	filter := pc.Filter()
 	t := pc.StartTimer("serialize_response", "recheck_urls")
 	if len(in.RecheckGroups) > 0 || len(in.PackRecheckGroups) > 0 {
-		resp.Recheck = s.buildRecheckURLs(in)
+		resp.Recheck = s.buildRecheckURLs(in, filter)
 		// PHP Rechecker appends pack recheck URLs after regular recheck URLs
-		resp.Recheck = append(resp.Recheck, s.buildPackManualRecheckURLs(in)...)
+		resp.Recheck = append(resp.Recheck, s.buildPackManualRecheckURLs(in, filter)...)
 	}
 	t.Stop()
 	if resp.Recheck == nil {
@@ -72,7 +73,7 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 
 	// Emit events (fire-and-forget, errors are non-fatal)
 	t = pc.StartTimer("serialize_response", "events")
-	s.emitEvents(ctx, in)
+	s.emitEvents(ctx, in, filter)
 	t.Stop()
 
 	return resp, nil
@@ -81,19 +82,19 @@ func (s *SerializeResponseStage) Execute(ctx context.Context, in FinalResults) (
 // buildRecheckURLs generates one URL per RecheckGroup, matching PHP Rechecker::getRecheckUrls.
 // URL is built manually (not via url.Values) to match PHP's exact parameter order and encoding:
 // commas in f/t are NOT percent-encoded; search_url IS percent-encoded (PHP uses http_build_query).
-func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
+func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults, filter domain.SearchFilter) []string {
 	if s.recheckBaseURL == "" {
 		return nil
 	}
 
-	dateStr := in.Filter.Date.Format("2006-01-02")
+	dateStr := filter.Date.Format("2006-01-02")
 	urls := make([]string, 0, len(in.RecheckGroups))
 
 	for _, g := range in.RecheckGroups {
 		var b strings.Builder
 		b.WriteString(s.recheckBaseURL)
 		b.WriteString("?l=")
-		b.WriteString(in.Filter.Lang)
+		b.WriteString(filter.Lang)
 		b.WriteString("&f=")
 		b.WriteString(intsToString(g.FromStationIDs))
 		b.WriteString("&t=")
@@ -101,19 +102,19 @@ func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 		b.WriteString("&d=")
 		b.WriteString(dateStr)
 		b.WriteString("&sa=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsAdult))
+		b.WriteString(strconv.Itoa(filter.SeatsAdult))
 		b.WriteString("&sc=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsChild))
+		b.WriteString(strconv.Itoa(filter.SeatsChild))
 		b.WriteString("&si=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsInfant))
+		b.WriteString(strconv.Itoa(filter.SeatsInfant))
 		b.WriteString("&a=")
-		b.WriteString(strconv.Itoa(in.Filter.AgentID))
-		if in.Filter.SearchURL != "" {
+		b.WriteString(strconv.Itoa(filter.AgentID))
+		if filter.SearchURL != "" {
 			b.WriteString("&search_url=")
-			b.WriteString(url.QueryEscape(in.Filter.SearchURL))
+			b.WriteString(url.QueryEscape(filter.SearchURL))
 		}
 		b.WriteString("&visitorId=")
-		b.WriteString(in.Filter.VisitorID)
+		b.WriteString(filter.VisitorID)
 
 		urls = append(urls, b.String())
 	}
@@ -124,14 +125,14 @@ func (s *SerializeResponseStage) buildRecheckURLs(in FinalResults) []string {
 // buildPackManualRecheckURLs generates /searchpm URLs for manual pack recheck groups.
 // PHP Rechecker: foreach ($recheck->manualPacks as $recheckGroup) { ... }
 // URL format: /searchpm?t=headTripKey1 tripKey1 date1,headTripKey2 tripKey2 date2&l=...&d=...&...
-func (s *SerializeResponseStage) buildPackManualRecheckURLs(in FinalResults) []string {
+func (s *SerializeResponseStage) buildPackManualRecheckURLs(in FinalResults, filter domain.SearchFilter) []string {
 	if s.recheckBaseURL == "" || len(in.PackRecheckGroups) == 0 {
 		return nil
 	}
 
 	// Derive /searchpm base URL from /searchr base URL
 	packBaseURL := strings.Replace(s.recheckBaseURL, "/searchr", "/searchpm", 1)
-	dateStr := in.Filter.Date.Format("2006-01-02")
+	dateStr := filter.Date.Format("2006-01-02")
 
 	urls := make([]string, 0, len(in.PackRecheckGroups))
 	for _, g := range in.PackRecheckGroups {
@@ -150,23 +151,23 @@ func (s *SerializeResponseStage) buildPackManualRecheckURLs(in FinalResults) []s
 		b.WriteString("?t=")
 		b.WriteString(strings.Join(tripParts, ","))
 		b.WriteString("&l=")
-		b.WriteString(in.Filter.Lang)
+		b.WriteString(filter.Lang)
 		b.WriteString("&d=")
 		b.WriteString(dateStr)
 		b.WriteString("&sa=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsAdult))
+		b.WriteString(strconv.Itoa(filter.SeatsAdult))
 		b.WriteString("&sc=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsChild))
+		b.WriteString(strconv.Itoa(filter.SeatsChild))
 		b.WriteString("&si=")
-		b.WriteString(strconv.Itoa(in.Filter.SeatsInfant))
+		b.WriteString(strconv.Itoa(filter.SeatsInfant))
 		b.WriteString("&a=")
-		b.WriteString(strconv.Itoa(in.Filter.AgentID))
-		if in.Filter.SearchURL != "" {
+		b.WriteString(strconv.Itoa(filter.AgentID))
+		if filter.SearchURL != "" {
 			b.WriteString("&search_url=")
-			b.WriteString(in.Filter.SearchURL)
+			b.WriteString(filter.SearchURL)
 		}
 		b.WriteString("&visitorId=")
-		b.WriteString(in.Filter.VisitorID)
+		b.WriteString(filter.VisitorID)
 
 		urls = append(urls, b.String())
 	}
@@ -174,16 +175,16 @@ func (s *SerializeResponseStage) buildPackManualRecheckURLs(in FinalResults) []s
 	return urls
 }
 
-func (s *SerializeResponseStage) emitEvents(ctx context.Context, in FinalResults) {
-	dateStr := in.Filter.Date.Format("2006-01-02")
+func (s *SerializeResponseStage) emitEvents(ctx context.Context, in FinalResults, filter domain.SearchFilter) {
+	dateStr := filter.Date.Format("2006-01-02")
 
 	// search.completed event
 	_ = s.publisher.Publish(ctx, domain.TopicSearchCompleted, domain.SearchCompletedEvent{
-		FromPlaceID: in.Filter.FromPlaceID,
-		ToPlaceID:   in.Filter.ToPlaceID,
+		FromPlaceID: filter.FromPlaceID,
+		ToPlaceID:   filter.ToPlaceID,
 		Date:        dateStr,
 		ResultCount: len(in.Trips),
-		AgentID:     in.Filter.AgentID,
+		AgentID:     filter.AgentID,
 		Timestamp:   time.Now(),
 	})
 
@@ -191,15 +192,15 @@ func (s *SerializeResponseStage) emitEvents(ctx context.Context, in FinalResults
 	if len(in.RecheckTripKeys) > 0 {
 		_ = s.publisher.Publish(ctx, domain.TopicSearchNeedsRecheck, domain.SearchNeedsRecheckEvent{
 			TripKeys:       in.RecheckTripKeys,
-			FromStationIDs: in.Filter.FromStationIDs,
-			ToStationIDs:   in.Filter.ToStationIDs,
+			FromStationIDs: filter.FromStationIDs,
+			ToStationIDs:   filter.ToStationIDs,
 			Date:           dateStr,
-			SeatsAdult:     in.Filter.SeatsAdult,
-			SeatsChild:     in.Filter.SeatsChild,
-			SeatsInfant:    in.Filter.SeatsInfant,
-			FXCode:         in.Filter.FXCode,
-			Lang:           in.Filter.Lang,
-			AgentID:        in.Filter.AgentID,
+			SeatsAdult:     filter.SeatsAdult,
+			SeatsChild:     filter.SeatsChild,
+			SeatsInfant:    filter.SeatsInfant,
+			FXCode:         filter.FXCode,
+			Lang:           filter.Lang,
+			AgentID:        filter.AgentID,
 		})
 	}
 }

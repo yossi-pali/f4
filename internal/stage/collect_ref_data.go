@@ -15,25 +15,19 @@ import (
 
 // CollectRefDataInput is the input for Stage 6.
 type CollectRefDataInput struct {
-	AllTrips                []domain.RawTrip
-	AllStationIDs           []int // station IDs from ALL raw trips (before filtering), for station collection
-	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // recheck data from ALL raw trips (before filtering)
-	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
-	Filter                  domain.SearchFilter
+	AllTrips      []domain.RawTrip
+	AllStationIDs []int // station IDs from ALL raw trips (before filtering), for station collection
 }
 
 // EnrichedTrips is the output of Stage 6.
 type EnrichedTrips struct {
-	Trips                   []domain.RawTrip
-	Operators               map[int]domain.Operator
-	Stations                map[int]domain.Station
-	Classes                 map[int]domain.VehicleClass
-	Images                  *domain.ImageCollection
-	ReasonTexts             map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
-	ManualIntegrationID     int // integration_id for integration_code='manual' (fallback for sellers without integration row)
-	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // passed through from FilterRawTrips
-	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
-	Filter                  domain.SearchFilter
+	Trips               []domain.RawTrip
+	Operators           map[int]domain.Operator
+	Stations            map[int]domain.Station
+	Classes             map[int]domain.VehicleClass
+	Images              *domain.ImageCollection
+	ReasonTexts         map[int]string // reason_id → translated text (e.g., "This trip is not bookable")
+	ManualIntegrationID int            // integration_id for integration_code='manual' (fallback for sellers without integration row)
 }
 
 // CollectRefDataStage batch-loads all reference data (operators, stations, classes, images) in parallel.
@@ -77,10 +71,7 @@ func (s *CollectRefDataStage) Name() string { return "collect_ref_data" }
 
 func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInput) (EnrichedTrips, error) {
 	out := EnrichedTrips{
-		Trips:                   in.AllTrips,
-		PreFilterRecheckEntries: in.PreFilterRecheckEntries,
-		PendingPackRechecks:     in.PendingPackRechecks,
-		Filter:                  in.Filter,
+		Trips: in.AllTrips,
 	}
 
 	if len(in.AllTrips) == 0 {
@@ -140,6 +131,7 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 
 	// Load all reference data in parallel
 	pc := pipeline.FromContext(ctx)
+	filter := pc.Filter()
 	const stage = "collect_ref_data"
 	origCtx := ctx
 	g, ctx := errgroup.WithContext(ctx)
@@ -211,7 +203,7 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	timedGo(g, "reasons", func() error {
 		reasonIDs := setToSlice(reasonIDSet)
 		var err error
-		out.ReasonTexts, err = s.reasonRepo.FindReasonTexts(ctx, reasonIDs, in.Filter.Lang)
+		out.ReasonTexts, err = s.reasonRepo.FindReasonTexts(ctx, reasonIDs, filter.Lang)
 		return err
 	})
 
@@ -256,7 +248,7 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 
 	timedGo(g, "weight_overrides", func() error {
 		var err error
-		weightOverrides, err = s.stationRepo.FindStationWeightOverrides(ctx, stationIDs, in.Filter.PageURL)
+		weightOverrides, err = s.stationRepo.FindStationWeightOverrides(ctx, stationIDs, filter.PageURL)
 		if err != nil {
 			weightOverrides = nil // non-fatal: use original weights
 		}
@@ -274,7 +266,7 @@ func (s *CollectRefDataStage) Execute(ctx context.Context, in CollectRefDataInpu
 	for _, c := range out.Classes {
 		classNames = append(classNames, c.Name)
 	}
-	classTranslations, _ = s.tranRepo.TranslateMany(origCtx, classNames, in.Filter.Lang)
+	classTranslations, _ = s.tranRepo.TranslateMany(origCtx, classNames, filter.Lang)
 	t.Stop()
 	if len(classTranslations) > 0 {
 		for id, c := range out.Classes {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/12go/f4/internal/domain"
 	"github.com/12go/f4/internal/event"
+	"github.com/12go/f4/internal/pipeline"
 	"github.com/12go/f4/internal/repository"
 )
 
@@ -41,10 +42,13 @@ func TestEnrichRoundTrips_NoOutboundTrip(t *testing.T) {
 
 	in := EnrichRoundTripsInput{
 		DirectTrips: trips,
-		Filter:      domain.SearchFilter{},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(domain.SearchFilter{})
+	ctx := pipeline.WithPipelineContext(context.Background(), pc)
+
+	out, err := stage.Execute(ctx, in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,15 +71,18 @@ func TestEnrichRoundTrips_CacheMissEmitsEvent(t *testing.T) {
 	date, _ := time.Parse("2006-01-02", "2024-01-01")
 	in := EnrichRoundTripsInput{
 		DirectTrips: []domain.RawTrip{{TripKey: "inbound1", DepartureTime: 600, Price: domain.TripPrice{Total: 50}}},
-		Filter: domain.SearchFilter{
-			OutboundTrip:   &domain.TripPlain{TripKey: "outbound1", IntegrationCode: "manual"},
-			FromStationIDs: []int{100},
-			Date:           date,
-			SeatsAdult:     1,
-		},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(domain.SearchFilter{
+		OutboundTrip:   &domain.TripPlain{TripKey: "outbound1", IntegrationCode: "manual"},
+		FromStationIDs: []int{100},
+		Date:           date,
+		SeatsAdult:     1,
+	})
+	ctx := pipeline.WithPipelineContext(context.Background(), pc)
+
+	out, err := stage.Execute(ctx, in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -120,17 +127,20 @@ func TestEnrichRoundTrips_DiscountCalculation(t *testing.T) {
 				Price:         domain.TripPrice{IsValid: true, Total: 80},
 			},
 		},
-		Filter: domain.SearchFilter{
-			OutboundTrip: &domain.TripPlain{
-				TripKey: "outbound1",
-				Price:   domain.TripPrice{IsValid: true, Total: 60},
-			},
-			FromStationIDs: []int{100},
-			Date:           date,
-		},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(domain.SearchFilter{
+		OutboundTrip: &domain.TripPlain{
+			TripKey: "outbound1",
+			Price:   domain.TripPrice{IsValid: true, Total: 60},
+		},
+		FromStationIDs: []int{100},
+		Date:           date,
+	})
+	ctx := pipeline.WithPipelineContext(context.Background(), pc)
+
+	out, err := stage.Execute(ctx, in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

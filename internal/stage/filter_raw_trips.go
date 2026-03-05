@@ -20,12 +20,10 @@ type CompositeRow struct {
 
 // FilteredTrips is the output of Stage 4.
 type FilteredTrips struct {
-	DirectTrips              []domain.RawTrip
-	ConnectionIDs            []int                      // set_id values for Stage 5a
-	ConnectionCompositeRows  map[int][]CompositeRow     // set_id → composite rows with (godate, dep2) tuples
-	AllStationIDs            []int                      // station IDs from ALL raw trips (before filtering), for station collection
-	PreFilterRecheckEntries  []domain.PreFilterRecheckEntry // recheck data from ALL raw trips (before filtering)
-	Filter                   domain.SearchFilter
+	DirectTrips             []domain.RawTrip
+	ConnectionIDs           []int                  // set_id values for Stage 5a
+	ConnectionCompositeRows map[int][]CompositeRow // set_id → composite rows with (godate, dep2) tuples
+	AllStationIDs           []int                  // station IDs from ALL raw trips (before filtering), for station collection
 }
 
 // FilterRawTripsStage removes hidden, meta, daytrip duplicates, and separates connections.
@@ -36,13 +34,14 @@ func NewFilterRawTripsStage() *FilterRawTripsStage { return &FilterRawTripsStage
 func (s *FilterRawTripsStage) Name() string { return "filter_raw_trips" }
 
 func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (FilteredTrips, error) {
-	out := FilteredTrips{Filter: in.Filter}
+	var out FilteredTrips
 
 	if len(in.Trips) == 0 {
 		return out, nil
 	}
 
 	pc := pipeline.FromContext(ctx)
+	filter := pc.Filter()
 	const stage = "filter_raw_trips"
 	t := pc.StartTimer(stage, "station_collect")
 
@@ -69,6 +68,7 @@ func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (F
 	// are unset() from $rawTrips BEFORE ChiefCook processes them, so they NEVER
 	// reach the recheck originalCollection. Only direct trips (set_id == 0/null),
 	// including those later filtered out (meta, daytrip duplicates, etc.), contribute.
+	var preFilterRecheckEntries []domain.PreFilterRecheckEntry
 	for _, t := range in.Trips {
 		if t.DepHideDeparture {
 			continue // PHP also skips these
@@ -78,7 +78,7 @@ func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (F
 			continue
 		}
 		if !t.Price.IsValid {
-			out.PreFilterRecheckEntries = append(out.PreFilterRecheckEntries, domain.PreFilterRecheckEntry{
+			preFilterRecheckEntries = append(preFilterRecheckEntries, domain.PreFilterRecheckEntry{
 				DepStationID:    t.DepStationID,
 				ArrStationID:    t.ArrStationID,
 				IntegrationCode: t.IntegrationCode,
@@ -92,6 +92,9 @@ func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (F
 			})
 		}
 	}
+
+	// Store pre-filter recheck entries on PipelineContext for Stage 8
+	pc.SetPreFilterRecheckEntries(preFilterRecheckEntries)
 
 	t.Stop()
 	t = pc.StartTimer(stage, "filter_loop")
@@ -141,8 +144,8 @@ func (s *FilterRawTripsStage) Execute(ctx context.Context, in RawTripsResult) (F
 		}
 
 		// Only pairs filter: keep only trips matching requested station pairs
-		if in.Filter.OnlyPairs {
-			if !isInStationPairs(trip.DepStationID, trip.ArrStationID, in.Filter.FromStationIDs, in.Filter.ToStationIDs) {
+		if filter.OnlyPairs {
+			if !isInStationPairs(trip.DepStationID, trip.ArrStationID, filter.FromStationIDs, filter.ToStationIDs) {
 				continue
 			}
 		}

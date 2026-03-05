@@ -14,7 +14,6 @@ import (
 // EnrichRoundTripsInput is the input for Stage 5b.
 type EnrichRoundTripsInput struct {
 	DirectTrips []domain.RawTrip
-	Filter      domain.SearchFilter
 }
 
 // RoundTripEnrichedTrips is the output of Stage 5b.
@@ -49,18 +48,20 @@ func NewEnrichRoundTripsStage(
 func (s *EnrichRoundTripsStage) Name() string { return "enrich_round_trips" }
 
 func (s *EnrichRoundTripsStage) Execute(ctx context.Context, in EnrichRoundTripsInput) (RoundTripEnrichedTrips, error) {
+	filter := pipeline.FromContext(ctx).Filter()
+
 	// If no outbound trip specified, pass through unchanged
-	if in.Filter.OutboundTrip == nil {
+	if filter.OutboundTrip == nil {
 		return RoundTripEnrichedTrips{Trips: in.DirectTrips}, nil
 	}
 
-	outbound := in.Filter.OutboundTrip
+	outbound := filter.OutboundTrip
 	region := db.DefaultRegion
-	if len(in.Filter.FromStationIDs) > 0 {
-		region = s.regionResolver.ResolveByStationID(in.Filter.FromStationIDs[0])
+	if len(filter.FromStationIDs) > 0 {
+		region = s.regionResolver.ResolveByStationID(filter.FromStationIDs[0])
 	}
 
-	godateStr := in.Filter.Date.Format("2006-01-02")
+	godateStr := filter.Date.Format("2006-01-02")
 
 	// Look up cached round trip prices
 	pc := pipeline.FromContext(ctx)
@@ -78,11 +79,11 @@ func (s *EnrichRoundTripsStage) Execute(ctx context.Context, in EnrichRoundTrips
 		_ = s.publisher.Publish(ctx, domain.TopicSearchNeedsRoundTrip, domain.SearchNeedsRoundTripPricesEvent{
 			OutboundTripKey: outbound.TripKey,
 			OutboundGodate:  godateStr,
-			InboundDate:     in.Filter.Date.Format("2006-01-02"),
+			InboundDate:     filter.Date.Format("2006-01-02"),
 			IntegrationCode: outbound.IntegrationCode,
-			SeatsAdult:      in.Filter.SeatsAdult,
-			SeatsChild:      in.Filter.SeatsChild,
-			SeatsInfant:     in.Filter.SeatsInfant,
+			SeatsAdult:      filter.SeatsAdult,
+			SeatsChild:      filter.SeatsChild,
+			SeatsInfant:     filter.SeatsInfant,
 		})
 		return RoundTripEnrichedTrips{Trips: in.DirectTrips}, nil
 	}

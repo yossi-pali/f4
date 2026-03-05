@@ -18,7 +18,6 @@ type AssembleMultiLegInput struct {
 	DirectTrips              []domain.RawTrip
 	ConnectionIDs            []int
 	ConnectionCompositeRows  map[int][]CompositeRow // set_id → composite rows with (godate, dep2) tuples
-	Filter                   domain.SearchFilter
 	SearchParams             repository.SearchParams // price params needed for fetching missing connection legs
 }
 
@@ -56,6 +55,7 @@ func (s *AssembleMultiLegStage) Name() string { return "assemble_multi_leg" }
 func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLegInput) (MultiLegTrips, error) {
 	var out MultiLegTrips
 	pc := pipeline.FromContext(ctx)
+	filter := pc.Filter()
 	const stage = "assemble_multi_leg"
 
 	// Build connections from trip_pool4_set
@@ -71,7 +71,7 @@ func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLeg
 	}
 
 	// Build autopacks
-	if in.Filter.WithAutopacks && in.Filter.FromPlaceID != domain.UnknownPlace && in.Filter.ToPlaceID != domain.UnknownPlace {
+	if filter.WithAutopacks && filter.FromPlaceID != domain.UnknownPlace && filter.ToPlaceID != domain.UnknownPlace {
 		t := pc.StartTimer(stage, "autopacks")
 		packs, err := s.buildAutopacks(ctx, in)
 		t.Stop()
@@ -86,10 +86,11 @@ func (s *AssembleMultiLegStage) Execute(ctx context.Context, in AssembleMultiLeg
 
 func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in AssembleMultiLegInput, pc *pipeline.PipelineContext) ([]domain.RawTrip, []domain.PendingPackRecheck, error) {
 	const stage = "assemble_multi_leg"
+	filter := pc.Filter()
 	// Determine region from first departure station
 	region := db.DefaultRegion
-	if len(in.Filter.FromStationIDs) > 0 {
-		region = s.regionResolver.ResolveByStationID(in.Filter.FromStationIDs[0])
+	if len(filter.FromStationIDs) > 0 {
+		region = s.regionResolver.ResolveByStationID(filter.FromStationIDs[0])
 	}
 
 	sets, err := s.tripPoolSetRepo.FindBySetIDs(ctx, region, in.ConnectionIDs)
@@ -173,7 +174,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 			for k := range keySet {
 				keys = append(keys, k)
 			}
-			adjustedDate := in.Filter.Date.AddDate(0, 0, dayOffset)
+			adjustedDate := filter.Date.AddDate(0, 0, dayOffset)
 			adjustedParams := in.SearchParams
 			adjustedParams.GodateString = adjustedDate.Format("2006-01-02")
 			fg.Go(func() error {
@@ -197,7 +198,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 	}
 
 	tm3 := pc.StartTimer(stage, "assembly")
-	searchDate := in.Filter.Date.Format("2006-01-02")
+	searchDate := filter.Date.Format("2006-01-02")
 
 	var connections []domain.RawTrip
 	var pendingPacks []domain.PendingPackRecheck
@@ -211,7 +212,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 			// recheck data so we can still generate /searchpm URLs.
 			// PHP's PackAndConnectionSearch fetches legs across dates; Go doesn't yet.
 			if set.PackID > 0 && ok1 && !ok2 && set.Trip2Day > 0 {
-				leg2Date := in.Filter.Date.AddDate(0, 0, set.Trip2Day).Format("2006-01-02")
+				leg2Date := filter.Date.AddDate(0, 0, set.Trip2Day).Format("2006-01-02")
 				pp := domain.PendingPackRecheck{
 					HeadTripKey: set.TripKey,
 					ChunkKey:    buildRecheckChunkKey(leg1, 0), // use leg1's integration for chunk key
@@ -223,7 +224,7 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 				if set.Trip3Key != nil && *set.Trip3Key != "" {
 					leg3Date := searchDate
 					if set.Trip3Day > 0 {
-						leg3Date = in.Filter.Date.AddDate(0, 0, set.Trip3Day).Format("2006-01-02")
+						leg3Date = filter.Date.AddDate(0, 0, set.Trip3Day).Format("2006-01-02")
 					}
 					pp.Legs = append(pp.Legs, domain.PendingPackLeg{TripKey: *set.Trip3Key, Date: leg3Date})
 				}
@@ -328,7 +329,8 @@ func (s *AssembleMultiLegStage) buildConnections(ctx context.Context, in Assembl
 }
 
 func (s *AssembleMultiLegStage) buildAutopacks(ctx context.Context, in AssembleMultiLegInput) ([]domain.RawTrip, error) {
-	configs, err := s.autopackRepo.FindByPlaces(ctx, in.Filter.FromPlaceID, in.Filter.ToPlaceID)
+	filter := pipeline.FromContext(ctx).Filter()
+	configs, err := s.autopackRepo.FindByPlaces(ctx, filter.FromPlaceID, filter.ToPlaceID)
 	if err != nil {
 		return nil, err
 	}

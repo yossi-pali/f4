@@ -170,6 +170,9 @@ func (s *BuildFilterStage) Execute(ctx context.Context, in BuildFilterInput) (do
 		filter.NeedPassNetpriceAndSysfee = hasPerm
 	}
 
+	// Store filter on PipelineContext for downstream stages
+	pc.SetFilter(filter)
+
 	return filter, nil
 }
 

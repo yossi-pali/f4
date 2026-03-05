@@ -15,14 +15,11 @@ import (
 
 // HydratedResults is the output of Stage 7.
 type HydratedResults struct {
-	Trips                   []domain.TripResult
-	Operators               map[int]domain.Operator
-	Stations                map[int]domain.Station
-	Classes                 map[int]domain.VehicleClass
-	PreFilterRecheckEntries []domain.PreFilterRecheckEntry // passed through from FilterRawTrips
-	PendingPackRechecks     []domain.PendingPackRecheck    // multi-day packs that couldn't be assembled
-	ManualIntegrationID     int                            // for chunk key computation in SortAndFinalize
-	Filter                  domain.SearchFilter
+	Trips               []domain.TripResult
+	Operators           map[int]domain.Operator
+	Stations            map[int]domain.Station
+	Classes             map[int]domain.VehicleClass
+	ManualIntegrationID int // for chunk key computation in SortAndFinalize
 }
 
 // HydrateResultsStage builds TripResult DTOs from raw trips and reference data.
@@ -34,20 +31,18 @@ func (s *HydrateResultsStage) Name() string { return "hydrate_results" }
 
 func (s *HydrateResultsStage) Execute(ctx context.Context, in EnrichedTrips) (HydratedResults, error) {
 	out := HydratedResults{
-		Operators:               in.Operators,
-		Stations:                in.Stations,
-		Classes:                 in.Classes,
-		PreFilterRecheckEntries: in.PreFilterRecheckEntries,
-		PendingPackRechecks:     in.PendingPackRechecks,
-		ManualIntegrationID:     in.ManualIntegrationID,
-		Filter:                  in.Filter,
+		Operators:           in.Operators,
+		Stations:            in.Stations,
+		Classes:             in.Classes,
+		ManualIntegrationID: in.ManualIntegrationID,
 	}
 
 	pc := pipeline.FromContext(ctx)
+	filter := pc.Filter()
 	t := pc.StartTimer("hydrate_results", "hydrate_loop")
 	results := make([]domain.TripResult, 0, len(in.Trips))
 	for _, raw := range in.Trips {
-		tr := s.hydrateTrip(raw, in)
+		tr := s.hydrateTrip(raw, in, filter)
 		results = append(results, tr)
 	}
 	t.Stop()
@@ -72,13 +67,13 @@ func (s *HydrateResultsStage) getTripPhotos(raw domain.RawTrip, in EnrichedTrips
 	return photos
 }
 
-func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) domain.TripResult {
+func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips, filter domain.SearchFilter) domain.TripResult {
 	// PHP: $travelOption->isBookable = op_bookable && available_seats > 0
 	isBookable := raw.OpBookable && raw.Price.Avail > 0
 
 	// PHP Search.php: $showUnavailable = $rawTrip['hide_days'] !== null && $isWebRequest &&
 	//   ($rawTrip['hide_days'] == 0 || ($now > $rawTrip['godate'] - (60 * 60 * 24 * $rawTrip['hide_days'])));
-	showUnavailable := raw.HideDaysIsSet && !in.Filter.IsBot &&
+	showUnavailable := raw.HideDaysIsSet && !filter.IsBot &&
 		(raw.HideDays == 0 || time.Now().Unix() > raw.Godate-int64(raw.HideDays)*86400)
 
 	tr := domain.TripResult{
@@ -249,10 +244,10 @@ func (s *HydrateResultsStage) hydrateTrip(raw domain.RawTrip, in EnrichedTrips) 
 
 	// Price breakdown from adult fare (conditional, matching PHP TravelOptionBaseFactory)
 	if adultFare := raw.Price.Fares["adult"]; adultFare != nil {
-		if in.Filter.NeedPassTopup {
+		if filter.NeedPassTopup {
 			opt.AgFee = &domain.PriceSimple{Value: adultFare.AgFee, FXCode: adultFare.AgFeeFXCode}
 		}
-		if in.Filter.NeedPassNetpriceAndSysfee {
+		if filter.NeedPassNetpriceAndSysfee {
 			opt.NetPriceDetail = &domain.PriceSimple{Value: adultFare.NetPrice, FXCode: adultFare.NetPriceFXCode}
 			opt.SysFeeDetail = &domain.PriceSimple{Value: adultFare.SysFee, FXCode: adultFare.SysFeeFXCode}
 		}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 )
 
 func TestHydrateResults_BasicTrip(t *testing.T) {
@@ -44,10 +45,12 @@ func TestHydrateResults_BasicTrip(t *testing.T) {
 		Operators: map[int]domain.Operator{1: {OperatorID: 1, Name: "TestOp"}},
 		Stations:  map[int]domain.Station{100: {StationID: 100}, 200: {StationID: 200}},
 		Classes:   map[int]domain.VehicleClass{10: {ClassID: 10}},
-		Filter:    domain.SearchFilter{},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(domain.SearchFilter{})
+	ctx := pipeline.WithPipelineContext(context.Background(), pc)
+	out, err := stage.Execute(ctx, in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,10 +261,12 @@ func TestHydrateResults_PHPMatchingFields(t *testing.T) {
 		Operators: map[int]domain.Operator{16779: {OperatorID: 16779, Name: "Thai Railway"}},
 		Stations:  map[int]domain.Station{3: {StationID: 3}, 4: {StationID: 4}},
 		Classes:   map[int]domain.VehicleClass{12: {ClassID: 12}},
-		Filter:    domain.SearchFilter{},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(domain.SearchFilter{})
+	ctx := pipeline.WithPipelineContext(context.Background(), pc)
+	out, err := stage.Execute(ctx, in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -5,7 +5,15 @@ import (
 	"testing"
 
 	"github.com/12go/f4/internal/domain"
+	"github.com/12go/f4/internal/pipeline"
 )
+
+// filterCtx creates a context with the given filter on PipelineContext.
+func filterCtx(f domain.SearchFilter) context.Context {
+	pc := pipeline.NewPipelineContext("")
+	pc.SetFilter(f)
+	return pipeline.WithPipelineContext(context.Background(), pc)
+}
 
 func makeRawTrip(tripKey string, operatorID, depStation, arrStation int) domain.RawTrip {
 	return domain.RawTrip{
@@ -25,11 +33,10 @@ func TestFilterRawTrips_FilterHiddenDepartures(t *testing.T) {
 	trip2.DepHideDeparture = true
 
 	in := RawTripsResult{
-		Trips:  []domain.RawTrip{trip1, trip2},
-		Filter: domain.SearchFilter{},
+		Trips: []domain.RawTrip{trip1, trip2},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,11 +57,10 @@ func TestFilterRawTrips_FilterMetaOperators(t *testing.T) {
 	trip2.IsMeta = true
 
 	in := RawTripsResult{
-		Trips:  []domain.RawTrip{trip1, trip2},
-		Filter: domain.SearchFilter{},
+		Trips: []domain.RawTrip{trip1, trip2},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,11 +79,10 @@ func TestFilterRawTrips_SeparateConnections(t *testing.T) {
 	trip2.SetID = &setID
 
 	in := RawTripsResult{
-		Trips:  []domain.RawTrip{trip1, trip2},
-		Filter: domain.SearchFilter{},
+		Trips: []domain.RawTrip{trip1, trip2},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,11 +106,10 @@ func TestFilterRawTrips_DaytripDetection(t *testing.T) {
 	trip3 := makeRawTrip("trip3", 2, 200, 100)
 
 	in := RawTripsResult{
-		Trips:  []domain.RawTrip{trip1, trip2, trip3},
-		Filter: domain.SearchFilter{},
+		Trips: []domain.RawTrip{trip1, trip2, trip3},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,14 +132,13 @@ func TestFilterRawTrips_OnlyPairs(t *testing.T) {
 
 	in := RawTripsResult{
 		Trips: []domain.RawTrip{trip1, trip2},
-		Filter: domain.SearchFilter{
-			OnlyPairs:      true,
-			FromStationIDs: []int{100},
-			ToStationIDs:   []int{200},
-		},
 	}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{
+		OnlyPairs:      true,
+		FromStationIDs: []int{100},
+		ToStationIDs:   []int{200},
+	}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,9 +154,9 @@ func TestFilterRawTrips_OnlyPairs(t *testing.T) {
 func TestFilterRawTrips_EmptyInput(t *testing.T) {
 	stage := NewFilterRawTripsStage()
 
-	in := RawTripsResult{Filter: domain.SearchFilter{}}
+	in := RawTripsResult{}
 
-	out, err := stage.Execute(context.Background(), in)
+	out, err := stage.Execute(filterCtx(domain.SearchFilter{}), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

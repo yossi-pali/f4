@@ -13,7 +13,6 @@ type RawTripsResult struct {
 	Trips       []domain.RawTrip
 	Region      string
 	QueryTimeMs int64
-	Filter      domain.SearchFilter
 }
 
 // QueryTripsStage executes the main SQL query against regional DB.
@@ -28,7 +27,7 @@ func NewQueryTripsStage(tripPoolRepo *repository.TripPoolRepo) *QueryTripsStage 
 func (s *QueryTripsStage) Name() string { return "query_trips" }
 
 func (s *QueryTripsStage) Execute(ctx context.Context, filter domain.SearchFilter) (RawTripsResult, error) {
-	result := RawTripsResult{Filter: filter}
+	var result RawTripsResult
 
 	if filter.IsNotPossible || len(filter.FromStationIDs) == 0 || len(filter.ToStationIDs) == 0 {
 		return result, nil
